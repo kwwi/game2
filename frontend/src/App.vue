@@ -10,6 +10,16 @@
 
     <div class="board-wrapper">
       <div class="board">
+        <svg class="board-lines" viewBox="0 0 9 11" preserveAspectRatio="none">
+          <line
+            v-for="(e, idx) in edgeLines"
+            :key="idx"
+            :x1="e.x1"
+            :y1="e.y1"
+            :x2="e.x2"
+            :y2="e.y2"
+          />
+        </svg>
         <div
           v-for="cell in cells"
           :key="cell.key"
@@ -65,24 +75,58 @@ const winner = ref(null);
 const selected = ref(null);
 const messages = ref([]);
 
-function isBlocked(x, y) {
-  if (x === 1 && [1, 2, 3, 4, 6, 7, 8, 9].includes(y)) return true;
-  if (x === 2 && [1, 2, 3, 7, 8, 9].includes(y)) return true;
+function isBlocked() {
+  // 新规则下 cc 文件中的所有点都是可用落子点，这里不再有不可用点
   return false;
 }
 
+// 棋盘坐标定义：左上角为 (0,0)，垂直向下为 x，水平向右为 y。
+// cc 数据中同样使用 [x,y] 这一坐标系：
+//   x ∈ [0,10] 表示行索引（0 在最上），y ∈ [0,8] 表示列索引（0 在最左）。
+// 因此前端网格大小固定为：rows = 11, cols = 9。
 const cells = computed(() => {
   const result = [];
   const pieces = (boardState.value && boardState.value.pieces) || {};
-  for (let y = 9; y >= 1; y--) {
-    for (let x = 1; x <= 9; x++) {
+  const maxX = 10; // 行数-1
+  const maxY = 8; // 列数-1
+  for (let x = 0; x <= maxX; x++) {
+    for (let y = 0; y <= maxY; y++) {
       const key = `${x},${y}`;
-      const usable = !isBlocked(x, y);
+      const usable = !isBlocked();
       const piece = pieces[key] || null;
-      result.push({ x, y, key, usable, piece });
+      result.push({
+        // 直接使用棋盘坐标参与后端交互
+        x,
+        y,
+        key: `${x}-${y}`,
+        usable,
+        piece
+      });
     }
   }
   return result;
+});
+
+const edgeLines = computed(() => {
+  if (!boardState.value || !Array.isArray(boardState.value.edges)) return [];
+  return boardState.value.edges
+    .map((s) => {
+      const parts = s.split('-');
+      if (parts.length !== 2) return null;
+      const [x1, y1] = parts[0].split(',').map((v) => parseInt(v, 10));
+      const [x2, y2] = parts[1].split(',').map((v) => parseInt(v, 10));
+      if (Number.isNaN(x1) || Number.isNaN(y1) || Number.isNaN(x2) || Number.isNaN(y2)) {
+        return null;
+      }
+      // 线段应穿过每个格子中心：中心坐标 = (y + 0.5, x + 0.5)
+      return {
+        x1: y1 + 0.5,
+        y1: x1 + 0.5,
+        x2: y2 + 0.5,
+        y2: x2 + 0.5
+      };
+    })
+    .filter(Boolean);
 });
 
 async function fetchState() {
@@ -93,29 +137,10 @@ async function fetchState() {
 }
 
 function normalizeBoard(board) {
-  // Spring 会把 Map<Position,PieceColor> 序列化为一个对象，key 是 Position.toString/字段。
-  // 为简单起见，这里在后端使用默认 Map -> 我们前端假设 key 格式为 {"x":1,"y":1} 这种 Jackson 风格不方便，
-  // 因此在后端改造前，前端使用一个兜底：如果存在 entries 字段，则按其中的 key.x/key.y 来恢复。
-  if (!board) return { pieces: {} };
-  const map = {};
-  if (board.pieces && Array.isArray(board.pieces)) {
-    for (const entry of board.pieces) {
-      const p = entry.key || entry.k || entry.position;
-      const color = entry.value || entry.v || entry.color;
-      if (!p || !color) continue;
-      const x = p.x ?? p.row ?? p.i;
-      const y = p.y ?? p.col ?? p.j;
-      if (x && y) {
-        map[`${x},${y}`] = color;
-      }
-    }
-  } else if (board.pieces && typeof board.pieces === 'object') {
-    // 如果后台改成字符串 key: "x,y"
-    for (const k of Object.keys(board.pieces)) {
-      map[k] = board.pieces[k];
-    }
-  }
-  return { pieces: map };
+  if (!board) return { pieces: {}, edges: [] };
+  const pieces = board.pieces && typeof board.pieces === 'object' ? board.pieces : {};
+  const edges = Array.isArray(board.edges) ? board.edges : [];
+  return { pieces, edges };
 }
 
 async function reset(firstPlayer) {

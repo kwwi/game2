@@ -29,7 +29,7 @@ public class GameService {
     public static class MoveResult {
         public boolean success;
         public String message;
-        public Board board;
+        public java.util.Map<String, Object> board;
         public PieceColor currentTurn;
         public PieceColor winner;
     }
@@ -85,16 +85,23 @@ public class GameService {
 
         result.success = true;
         result.message = "ok";
-        result.board = board;
+        result.board = buildBoardView();
         result.currentTurn = currentTurn;
         result.winner = winner;
         return result;
     }
 
     private void fillState(MoveResult result) {
-        result.board = board;
+        result.board = buildBoardView();
         result.currentTurn = currentTurn;
         result.winner = checkWinner();
+    }
+
+    private Map<String, Object> buildBoardView() {
+        Map<String, Object> view = new HashMap<>();
+        view.put("pieces", board.getSerializablePieces());
+        view.put("edges", board.getSerializableEdges());
+        return view;
     }
 
     private void applyRecursiveCaptures(Position lastMovePos, PieceColor moverColor) {

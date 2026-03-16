@@ -22,7 +22,10 @@ public class GameController {
     @GetMapping("/state")
     public Map<String, Object> getState() {
         Map<String, Object> res = new HashMap<>();
-        res.put("board", gameService.getBoard());
+        Map<String, Object> boardView = new HashMap<>();
+        boardView.put("pieces", gameService.getBoard().getSerializablePieces());
+        boardView.put("edges", gameService.getBoard().getSerializableEdges());
+        res.put("board", boardView);
         res.put("currentTurn", gameService.getCurrentTurn());
         res.put("winner", null);
         return res;
