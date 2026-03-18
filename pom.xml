@@ -4,14 +4,14 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>com.example</groupId>
-    <artifactId>boardgame</artifactId>
+    <artifactId>game2</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>boardgame</name>
+    <name>game2</name>
 
     <properties>
-        <java.version>1.8</java.version>
+        <java.version>11</java.version>
         <spring.boot.version>2.7.18</spring.boot.version>
     </properties>
 

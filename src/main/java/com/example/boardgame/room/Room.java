@@ -18,6 +18,8 @@ public class Room {
     private final Map<String, Invite> invitesById = new LinkedHashMap<>();
 
     private final GameInstance game = new GameInstance();
+    private PieceColor winner;
+    private boolean hasMoves;
     private Path currentRecordFile;
     private Instant recordStartedAt;
 
@@ -37,6 +39,22 @@ public class Room {
 
     public GameInstance getGame() {
         return game;
+    }
+
+    public PieceColor getWinner() {
+        return winner;
+    }
+
+    public void setWinner(PieceColor winner) {
+        this.winner = winner;
+    }
+
+    public boolean hasMoves() {
+        return hasMoves;
+    }
+
+    public void markMovePlayed() {
+        this.hasMoves = true;
     }
 
     public Map<String, Participant> getParticipantsById() {

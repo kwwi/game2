@@ -54,6 +54,12 @@ public class RoomController {
         return of("success", true);
     }
 
+    @PostMapping("/{roomId}/leave-game")
+    public Map<String, Object> leaveGameAsSpectator(@PathVariable String roomId, @RequestBody LeaveRequest req) {
+        roomService.leaveGameAsSpectator(roomId, req.userId);
+        return of("success", true);
+    }
+
     @GetMapping("/{roomId}/state")
     public Map<String, Object> state(@PathVariable String roomId) {
         return roomService.getGameState(roomId);

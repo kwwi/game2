@@ -4,6 +4,12 @@ body {
   background: radial-gradient(circle at top, #f9fafb, #e5e7eb);
 }
 
+:root {
+  /* 可替换棋子图片（放在 frontend/public/pieces/ 下） */
+  --piece-black-image: url('/pieces/piece-black.png');
+  --piece-white-image: url('/pieces/piece-white.png');
+}
+
 #app {
   min-height: 100vh;
   display: flex;
@@ -16,7 +22,7 @@ body {
   border-radius: 16px;
   box-shadow: 0 20px 40px rgba(15, 23, 42, 0.15);
   padding: 24px 28px;
-  max-width: 960px;
+  max-width: 1240px;
   width: 100%;
 }
 
@@ -58,37 +64,92 @@ body {
 
 .board-wrapper {
   display: flex;
-  gap: 24px;
+  flex-direction: row;
+  gap: 22px;
   margin-top: 12px;
+  align-items: flex-start;
+  justify-content: center;
 }
 
 .board {
   display: grid;
-  grid-template-columns: repeat(9, 40px); /* 列数对应 y 0..8（水平方向） */
-  grid-template-rows: repeat(11, 40px); /* 行数对应 x 0..10（垂直方向） */
-  gap: 2px;
-  padding: 8px;
+  --cell: clamp(34px, 6.8vw, 76px);
+  --gap: 2px;
+  grid-template-columns: repeat(9, var(--cell)); /* 列数对应 y 0..8（水平方向） */
+  grid-template-rows: repeat(11, var(--cell)); /* 行数对应 x 0..10（垂直方向） */
+  gap: var(--gap);
+  padding: 0;
   background: #e5e7eb;
   border-radius: 12px;
   position: relative;
+  flex: 0 0 auto;
+}
+
+.board.board-disabled .cell {
+  cursor: not-allowed;
+}
+
+.board.board-disabled .piece {
+  cursor: not-allowed;
+}
+
+.cell {
+  cursor: default;
+}
+
+.cell.cell-clickable {
+  cursor: pointer;
+}
+
+.piece.clickable {
+  cursor: pointer;
+}
+
+.chat-log .log-entry {
+  line-height: 1.45;
+}
+
+.chat-content {
+  color: #111827;
+  word-break: break-word;
 }
 
 .board-lines {
   position: absolute;
-  inset: 8px;
-  width: calc(100% - 16px);
-  height: calc(100% - 16px);
+  inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
 }
 
 .board-lines line {
   stroke: #9ca3af;
-  stroke-width: 0.15;
+  /* viewBox 使用像素坐标后，stroke-width 直接按像素控制 */
+  stroke-width: 1;
+}
+
+.records-panel {
+  position: fixed;
+  top: 90px;
+  right: 20px;
+  bottom: 20px;
+  width: 420px;
+  max-width: calc(100vw - 40px);
+  background: rgba(255, 255, 255, 0.98);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.25);
+  z-index: 1000;
+  overflow: auto;
+  padding: 14px 16px;
+}
+
+.records-panel pre {
+  margin: 0;
 }
 
 .cell {
-  width: 40px;
-  height: 40px;
+  width: var(--cell);
+  height: var(--cell);
   position: relative;
   display: flex;
   align-items: center;
@@ -97,8 +158,12 @@ body {
 
 .cell.usable::before {
   content: '';
-  width: 6px;
-  height: 6px;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: calc(var(--cell) * 0.14);
+  height: calc(var(--cell) * 0.14);
   border-radius: 999px;
   background: #9ca3af;
 }
@@ -108,36 +173,86 @@ body {
 }
 
 .piece {
-  position: absolute;
-  width: 26px;
-  height: 26px;
+  /* 让棋子跟随 .cell 的 flex 居中，避免 absolute/transform 带来的像素偏移 */
+  position: relative;
+  width: calc(var(--cell) * 0.65);
+  height: calc(var(--cell) * 0.65);
   border-radius: 999px;
   box-shadow: 0 4px 8px rgba(15, 23, 42, 0.25);
-  cursor: pointer;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
+  /* 默认禁止图标：只有可点击（当前回合可选）的棋子会变成 pointer */
+  cursor: not-allowed;
   transition: transform 0.12s ease, box-shadow 0.12s ease, outline 0.12s ease;
 }
 
 .piece.black {
-  background: radial-gradient(circle at 30% 30%, #6b7280, #020617);
+  background-image: var(--piece-black-image),
+    radial-gradient(circle at 30% 30%, #6b7280, #020617);
+  background-size: cover, auto;
+  background-repeat: no-repeat, no-repeat;
+  background-position: center, center;
 }
 
 .piece.white {
-  background: radial-gradient(circle at 30% 30%, #ffffff, #d1d5db);
+  background-image: var(--piece-white-image),
+    radial-gradient(circle at 30% 30%, #ffffff, #d1d5db);
+  background-size: cover, auto;
+  background-repeat: no-repeat, no-repeat;
+  background-position: center, center;
 }
 
 .piece.selected {
-  transform: translate(-50%, -50%) scale(1.05);
+  transform: scale(1.05);
   outline: 2px solid #22c55e;
   outline-offset: 2px;
 }
 
 .info-panel {
-  flex: 1;
+  width: 360px;
+  max-width: 40vw;
   font-size: 13px;
   color: #374151;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: calc(100vh - 120px);
+  min-height: 520px;
+}
+
+.participants-window {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  background: #f9fafb;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.players-window {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  background: #f9fafb;
+  border-radius: 10px;
+  padding: 8px 10px;
+  height: 90px; /* 固定：对弈席位（展示两条信息即可） */
+}
+
+.spectators-window {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  background: #f9fafb;
+  border-radius: 10px;
+  padding: 8px 10px;
+  height: 190px; /* 固定：观众席位 */
+}
+
+.chat-window {
+  height: 230px; /* 固定大小：超出滚动 */
+  overflow: auto;
 }
 
 .turn-indicator {

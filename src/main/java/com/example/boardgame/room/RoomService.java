@@ -35,6 +35,17 @@ public class RoomService {
             String id = String.valueOf(i);
             rooms.put(id, new Room(id, "房间 " + id));
             ensureRoomRecordFile(id);
+            // record only game lifecycle: init snapshot
+            Room r = rooms.get(id);
+            if (r != null) {
+                appendGameEvent(r, of(
+                        "type", "init",
+                        "ts", Instant.now().toString(),
+                        "board", r.getGame().buildBoardView(),
+                        "currentTurn", r.getGame().getCurrentTurn().toString(),
+                        "winner", null
+                ));
+            }
         }
     }
 
@@ -55,6 +66,38 @@ public class RoomService {
         Room r = requireRoom(roomId);
         Participant existing = r.getParticipantsById().get(userId);
         if (existing != null) {
+            // Existing participant can upgrade/downgrade based on available seat.
+            if (desired == RoomRole.PLAYER) {
+                // Upgrade spectator -> player only when a seat is available.
+                if (existing.getSeat() == null) {
+                    if (r.getBlackPlayerUserId() == null) {
+                        existing.setRole(RoomRole.PLAYER);
+                        existing.setSeat(Seat.BLACK);
+                        r.setBlackPlayerUserId(userId);
+                    } else if (r.getWhitePlayerUserId() == null) {
+                        existing.setRole(RoomRole.PLAYER);
+                        existing.setSeat(Seat.WHITE);
+                        r.setWhitePlayerUserId(userId);
+                    } else {
+                        existing.setRole(RoomRole.SPECTATOR);
+                        existing.setSeat(null);
+                    }
+                }
+            } else {
+                // Downgrade to spectator and free seat if user currently holds one.
+                if (existing.getSeat() != null) {
+                    if (existing.getSeat() == Seat.BLACK && userId.equals(r.getBlackPlayerUserId())) {
+                        r.setBlackPlayerUserId(null);
+                    }
+                    if (existing.getSeat() == Seat.WHITE && userId.equals(r.getWhitePlayerUserId())) {
+                        r.setWhitePlayerUserId(null);
+                    }
+                }
+                existing.setRole(RoomRole.SPECTATOR);
+                existing.setSeat(null);
+            }
+
+            eventHub.broadcast(roomId, "room", of("type", "room", "room", roomView(r)));
             return roomJoinView(r, existing);
         }
 
@@ -77,14 +120,6 @@ public class RoomService {
 
         Participant p = new Participant(userId, name, actualRole, seat);
         r.getParticipantsById().put(userId, p);
-        appendRecordEvent(r, of(
-                "type", "join",
-                "ts", Instant.now().toString(),
-                "userId", userId,
-                "name", name,
-                "role", actualRole.toString(),
-                "seat", seat == null ? null : seat.toString()
-        ));
 
         eventHub.broadcast(roomId, "room", of("type", "room", "room", roomView(r)));
         return roomJoinView(r, p);
@@ -95,20 +130,53 @@ public class RoomService {
         Participant p = r.getParticipantsById().remove(userId);
         if (p == null) return;
 
+        Seat seat = userId.equals(r.getBlackPlayerUserId()) ? Seat.BLACK
+                : userId.equals(r.getWhitePlayerUserId()) ? Seat.WHITE
+                : null;
+
         if (userId.equals(r.getBlackPlayerUserId())) {
             r.setBlackPlayerUserId(null);
         }
         if (userId.equals(r.getWhitePlayerUserId())) {
             r.setWhitePlayerUserId(null);
         }
-        appendRecordEvent(r, of(
-                "type", "leave",
-                "ts", Instant.now().toString(),
-                "userId", userId,
-                "name", p.getName()
-        ));
+
+        // 完全退出房间：不判胜负。对局状态保持不变，等待其他用户补位后继续对弈。
+        eventHub.broadcast(roomId, "room", of("type", "room", "room", roomView(r)));
+    }
+
+    /**
+     * 退出对弈（释放席位但留在房间作为观众），不判胜负。
+     * 用于“棋手先离开对局，但房间还在，允许其它新进入用户选择接手继续对弈”。
+     */
+    public synchronized void leaveGameAsSpectator(String roomId, String userId) {
+        Room r = requireRoom(roomId);
+        Participant p = r.getParticipantsById().get(userId);
+        if (p == null) return;
+
+        boolean wasPlayer = userId.equals(r.getBlackPlayerUserId()) || userId.equals(r.getWhitePlayerUserId());
+        if (!wasPlayer) {
+            return;
+        }
+
+        if (userId.equals(r.getBlackPlayerUserId())) {
+            r.setBlackPlayerUserId(null);
+        }
+        if (userId.equals(r.getWhitePlayerUserId())) {
+            r.setWhitePlayerUserId(null);
+        }
+
+        p.setRole(RoomRole.SPECTATOR);
+        p.setSeat(null);
 
         eventHub.broadcast(roomId, "room", of("type", "room", "room", roomView(r)));
+        eventHub.broadcast(roomId, "state", of(
+                "type", "state",
+                "board", r.getGame().buildBoardView(),
+                "currentTurn", r.getGame().getCurrentTurn().toString(),
+                "winner", r.getWinner(),
+                "room", roomView(r)
+        ));
     }
 
     public synchronized List<ChatMessage> chatHistory(String roomId) {
@@ -122,14 +190,6 @@ public class RoomService {
         String name = p != null ? p.getName() : "匿名";
         ChatMessage msg = new ChatMessage(UUID.randomUUID().toString(), roomId, userId, name, content, Instant.now());
         r.addChat(msg, CHAT_MAX);
-        appendRecordEvent(r, of(
-                "type", "chat",
-                "ts", msg.getTs().toString(),
-                "id", msg.getId(),
-                "userId", userId,
-                "name", name,
-                "content", content
-        ));
         eventHub.broadcast(roomId, "chat", of("type", "chat", "message", of(
                 "id", msg.getId(),
                 "roomId", msg.getRoomId(),
@@ -147,12 +207,21 @@ public class RoomService {
         res.put("room", roomView(r));
         res.put("board", r.getGame().buildBoardView());
         res.put("currentTurn", r.getGame().getCurrentTurn());
-        res.put("winner", null);
+        res.put("winner", r.getWinner());
         return res;
     }
 
     public synchronized GameInstance.MoveResult move(String roomId, String userId, int fromX, int fromY, int toX, int toY) {
         Room r = requireRoom(roomId);
+        if (r.getWinner() != null) {
+            GameInstance.MoveResult denied = new GameInstance.MoveResult();
+            denied.success = false;
+            denied.message = "对局已结束";
+            denied.board = r.getGame().buildBoardView();
+            denied.currentTurn = r.getGame().getCurrentTurn();
+            denied.winner = r.getWinner();
+            return denied;
+        }
         Participant p = r.getParticipantsById().get(userId);
         if (p == null || p.getRole() != RoomRole.PLAYER || p.getSeat() == null) {
             GameInstance.MoveResult denied = new GameInstance.MoveResult();
@@ -177,7 +246,8 @@ public class RoomService {
 
         GameInstance.MoveResult res = r.getGame().move(fromX, fromY, toX, toY);
         if (res.success) {
-            appendRecordEvent(r, of(
+            r.markMovePlayed();
+            appendGameEvent(r, of(
                     "type", "move",
                     "ts", Instant.now().toString(),
                     "userId", userId,
@@ -190,6 +260,16 @@ public class RoomService {
                     "currentTurn", res.currentTurn == null ? null : res.currentTurn.toString(),
                     "winner", res.winner == null ? null : res.winner.toString()
             ));
+            if (res.winner != null) {
+                r.setWinner(res.winner);
+                appendGameEvent(r, of(
+                        "type", "end",
+                        "ts", Instant.now().toString(),
+                        "winner", res.winner.toString(),
+                        "board", res.board,
+                        "currentTurn", res.currentTurn == null ? null : res.currentTurn.toString()
+                ));
+            }
             eventHub.broadcast(roomId, "state", of(
                     "type", "state",
                     "board", res.board,
@@ -219,6 +299,12 @@ public class RoomService {
             return of("success", false, "message", "只能替换自己的席位");
         }
 
+        // 正在对弈的双方不允许互相替换
+        String otherUserId = (seat == Seat.BLACK) ? r.getWhitePlayerUserId() : r.getBlackPlayerUserId();
+        if (otherUserId != null && otherUserId.equals(toUserId)) {
+            return of("success", false, "message", "对弈双方不能互相替换");
+        }
+
         String oldUserId = (seat == Seat.BLACK) ? r.getBlackPlayerUserId() : r.getWhitePlayerUserId();
         if (oldUserId == null || !oldUserId.equals(fromUserId)) {
             return of("success", false, "message", "席位信息不一致");
@@ -227,14 +313,6 @@ public class RoomService {
         String inviteId = UUID.randomUUID().toString();
         Invite invite = new Invite(inviteId, roomId, fromUserId, toUserId, seat);
         r.getInvitesById().put(inviteId, invite);
-        appendRecordEvent(r, of(
-                "type", "invite",
-                "ts", Instant.now().toString(),
-                "inviteId", inviteId,
-                "fromUserId", fromUserId,
-                "toUserId", toUserId,
-                "seat", seat.toString()
-        ));
         Map<String, Object> inviteView = of(
                 "inviteId", invite.getInviteId(),
                 "roomId", invite.getRoomId(),
@@ -262,12 +340,6 @@ public class RoomService {
         if (!accept) {
             invite.setStatus(InviteStatus.DECLINED);
             invite.setResolvedAt(Instant.now());
-            appendRecordEvent(r, of(
-                    "type", "inviteRespond",
-                    "ts", Instant.now().toString(),
-                    "inviteId", inviteId,
-                    "action", "DECLINE"
-            ));
             eventHub.sendToUser(roomId, invite.getFromUserId(), "inviteResolved", of(
                     "type", "inviteResolved",
                     "inviteId", inviteId,
@@ -310,15 +382,6 @@ public class RoomService {
         invite.setStatus(InviteStatus.ACCEPTED);
         invite.setResolvedAt(Instant.now());
 
-        appendRecordEvent(r, of(
-                "type", "replace",
-                "ts", Instant.now().toString(),
-                "inviteId", inviteId,
-                "fromUserId", invite.getFromUserId(),
-                "toUserId", invite.getToUserId(),
-                "seat", invite.getSeat().toString()
-        ));
-
         eventHub.broadcast(roomId, "room", of("type", "room", "room", roomView(r)));
         eventHub.broadcast(roomId, "state", of(
                 "type", "state",
@@ -343,6 +406,31 @@ public class RoomService {
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(recordsDir, "*.jsonl")) {
                 for (Path p : ds) {
                     res.add(of("id", p.getFileName().toString(), "path", p.toString()));
+                }
+            }
+            res.sort(Comparator.comparing(m -> String.valueOf(m.get("id"))));
+            return res;
+        } catch (IOException e) {
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Only return records that belong to the given user.
+     * Heuristic: record JSONL lines include `"userId":"..."`
+     */
+    public synchronized List<Map<String, Object>> listMyRecords(String userId) {
+        try {
+            if (!Files.exists(recordsDir)) return Collections.emptyList();
+            String needle = "\"userId\":\"" + escape(userId) + "\"";
+
+            List<Map<String, Object>> res = new ArrayList<>();
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(recordsDir, "*.jsonl")) {
+                for (Path p : ds) {
+                    String content = Files.readString(p, StandardCharsets.UTF_8);
+                    if (content.contains(needle)) {
+                        res.add(of("id", p.getFileName().toString(), "path", p.toString()));
+                    }
                 }
             }
             res.sort(Comparator.comparing(m -> String.valueOf(m.get("id"))));
@@ -379,11 +467,7 @@ public class RoomService {
     public synchronized Map<String, Object> restoreSnapshot(String roomId, Map<String, Object> boardView, PieceColor currentTurn) {
         Room r = requireRoom(roomId);
         r.getGame().loadFromSnapshot(boardView, currentTurn);
-        appendRecordEvent(r, of(
-                "type", "loadRecord",
-                "ts", Instant.now().toString(),
-                "roomId", roomId
-        ));
+        r.setWinner(null);
         return getGameState(roomId);
     }
 
@@ -447,6 +531,15 @@ public class RoomService {
         }
         r.setCurrentRecordFile(p);
         r.setRecordStartedAt(Instant.now());
+    }
+
+    private void appendGameEvent(Room r, Map<String, Object> event) {
+        // Only record: init / move / end / quit
+        Object t = event.get("type");
+        if (t == null) return;
+        String type = String.valueOf(t);
+        if (!Set.of("init", "move", "end", "quit").contains(type)) return;
+        appendRecordEvent(r, event);
     }
 
     private void appendRecordEvent(Room r, Map<String, Object> event) {

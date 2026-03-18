@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
 import java.util.Map;
+import java.util.List;
 import static com.example.boardgame.util.Maps.of;
 
 @RestController
@@ -52,6 +53,14 @@ public class RecordController {
             return of("success", true, "message", "ok", "state", state);
         }
         return of("success", false, "message", "record has no snapshot");
+    }
+
+    /**
+     * List records owned by current user (heuristic filter by `"userId":"..."`).
+     */
+    @GetMapping("/mine")
+    public List<Map<String, Object>> mine(@RequestParam String userId) {
+        return roomService.listMyRecords(userId);
     }
 }
 
