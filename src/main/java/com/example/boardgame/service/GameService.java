@@ -1,16 +1,20 @@
 package com.example.boardgame.service;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+import org.springframework.stereotype.Service;
+
 import com.example.boardgame.model.Board;
 import com.example.boardgame.model.PieceColor;
 import com.example.boardgame.model.Position;
-import org.springframework.stereotype.Service;
-
-import java.util.*;
 
 @Service
 public class GameService {
 
-    private Board board = new Board();
+    private Board      board       = new Board();
     private PieceColor currentTurn = PieceColor.BLACK;
 
     public Board getBoard() {
@@ -27,11 +31,11 @@ public class GameService {
     }
 
     public static class MoveResult {
-        public boolean success;
-        public String message;
+        public boolean                       success;
+        public String                        message;
         public java.util.Map<String, Object> board;
-        public PieceColor currentTurn;
-        public PieceColor winner;
+        public PieceColor                    currentTurn;
+        public PieceColor                    winner;
     }
 
     public MoveResult move(int fromX, int fromY, int toX, int toY) {
@@ -105,54 +109,75 @@ public class GameService {
     }
 
     private void applyRecursiveCaptures(Position lastMovePos, PieceColor moverColor) {
+        Set<Position> frontier = new HashSet<>();
+        frontier.add(lastMovePos);
+
         boolean changed;
         do {
-            changed = applySinglePassCaptures(moverColor);
-        } while (changed);
+            CapturePass pass = applySinglePassCaptures(frontier, moverColor);
+            changed = pass.changed;
+            frontier = pass.nextFrontier;
+        } while (changed && !frontier.isEmpty());
     }
 
-    private boolean applySinglePassCaptures(PieceColor moverColor) {
-        boolean changed = false;
+    private static class CapturePass {
+        boolean       changed;
+        Set<Position> nextFrontier = new HashSet<>();
+    }
+
+    /**
+     * 单轮夹/挑：
+     * - 夹：A(触发点)-B-C 在同一直线上且相邻（A->B、B->C为最小距离），并且 A 与 C 同色，则翻转中间的 B。
+     * - 挑：B-A-C 在同一直线上且相邻（B->A、A->C为最小距离），并且 B 与 C 为对手棋子，则翻转两边的 B、C。
+     *
+     * 触发点集合用于递归：上一轮移动点 + 上一轮被翻转成己方的点。
+     */
+    private CapturePass applySinglePassCaptures(Set<Position> anchors, PieceColor moverColor) {
+        CapturePass pass = new CapturePass();
         Map<Position, PieceColor> snapshot = new HashMap<>(board.getPieces());
         Set<Position> toFlip = new HashSet<>();
 
-        for (Map.Entry<Position, PieceColor> entry : snapshot.entrySet()) {
-            Position p = entry.getKey();
-            PieceColor color = entry.getValue();
-            if (color != moverColor) continue;
+        int[][] dirs = {
+                         { 1, 0 },
+                         { 0, 1 },
+                         { -1, 0 },
+                         { 0, -1 },
+                         { 1, 1 },
+                         { 1, -1 },
+                         { -1, -1 },
+                         { -1, 1 }
+        };
 
-            // check lines through p in 8 directions: (dx,dy)
-            int[][] dirs = {
-                    {1, 0}, {-1, 0}, {0, 1}, {0, -1},
-                    {1, 1}, {-1, -1}, {1, -1}, {-1, 1}
-            };
+        for (Position a : anchors) {
+            PieceColor aColor = snapshot.get(a);
+            if (aColor != moverColor)
+                continue;
 
             for (int[] d : dirs) {
                 int dx = d[0];
                 int dy = d[1];
 
-                Position pMinus = new Position(p.getX() - dx, p.getY() - dy);
-                Position pPlus = new Position(p.getX() + dx, p.getY() + dy);
-
-                if (!board.isInside(pMinus) || !board.isInside(pPlus)) continue;
-
-                if (!areColinearNeighbors(pMinus, p, pPlus, dx, dy)) continue;
-
-                PieceColor cMinus = snapshot.get(pMinus);
-                PieceColor cPlus = snapshot.get(pPlus);
-
-                // 夹: moverColor - opponent - moverColor
-                if (cMinus == moverColor && cPlus != null && cPlus != moverColor) {
-                    toFlip.add(pPlus);
-                }
-                if (cPlus == moverColor && cMinus != null && cMinus != moverColor) {
-                    toFlip.add(pMinus);
+                // 夹：A-B-C（A是触发点/移动到的位置），翻转B
+                Position b = new Position(a.getX() + dx, a.getY() + dy);
+                Position c = new Position(a.getX() + 2 * dx, a.getY() + 2 * dy);
+                if (board.isInside(b) && board.isInside(c) && board.getNeighbors(a).contains(b) && board.getNeighbors(b).contains(c)) {
+                    PieceColor bColor = snapshot.get(b);
+                    PieceColor cColor = snapshot.get(c);
+                    if (bColor != null && bColor != moverColor && cColor == moverColor) {
+                        toFlip.add(b);
+                    }
                 }
 
-                // 挑: opponent - moverColor - opponent
-                if (cMinus != null && cMinus != moverColor && cPlus != null && cPlus != moverColor) {
-                    toFlip.add(pMinus);
-                    toFlip.add(pPlus);
+                // 挑：B-A-C（A是中间），翻转两边 B、C
+                Position left = new Position(a.getX() - dx, a.getY() - dy);
+                Position right = new Position(a.getX() + dx, a.getY() + dy);
+                if (board.isInside(left) && board.isInside(right) && board.getNeighbors(left).contains(a) && board.getNeighbors(a).contains(right)) {
+                    PieceColor lColor = snapshot.get(left);
+                    PieceColor rColor = snapshot.get(right);
+                    if (lColor != null && lColor != moverColor && rColor != null && rColor != moverColor) {
+                        toFlip.add(left);
+                        toFlip.add(right);
+                    }
                 }
             }
         }
@@ -160,16 +185,19 @@ public class GameService {
         if (!toFlip.isEmpty()) {
             for (Position pos : toFlip) {
                 board.setPiece(pos, moverColor);
+                pass.nextFrontier.add(pos);
             }
-            changed = true;
+            pass.changed = true;
         }
-        return changed;
+        return pass;
     }
 
     private boolean areColinearNeighbors(Position a, Position b, Position c, int dx, int dy) {
         // points must be exactly one step apart along (dx,dy) direction and on same straight line
-        if (!board.getNeighbors(a).contains(b)) return false;
-        if (!board.getNeighbors(b).contains(c)) return false;
+        if (!board.getNeighbors(a).contains(b))
+            return false;
+        if (!board.getNeighbors(b).contains(c))
+            return false;
         int abx = b.getX() - a.getX();
         int aby = b.getY() - a.getY();
         int bcx = c.getX() - b.getX();
@@ -181,13 +209,17 @@ public class GameService {
         boolean hasBlack = false;
         boolean hasWhite = false;
         for (PieceColor color : board.getPieces().values()) {
-            if (color == PieceColor.BLACK) hasBlack = true;
-            if (color == PieceColor.WHITE) hasWhite = true;
+            if (color == PieceColor.BLACK)
+                hasBlack = true;
+            if (color == PieceColor.WHITE)
+                hasWhite = true;
         }
-        if (!hasBlack && hasWhite) return PieceColor.WHITE;
-        if (!hasWhite && hasBlack) return PieceColor.BLACK;
-        if (!hasBlack && !hasWhite) return null;
+        if (!hasBlack && hasWhite)
+            return PieceColor.WHITE;
+        if (!hasWhite && hasBlack)
+            return PieceColor.BLACK;
+        if (!hasBlack && !hasWhite)
+            return null;
         return null;
     }
 }
-
