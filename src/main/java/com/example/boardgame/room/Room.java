@@ -22,6 +22,14 @@ public class Room {
     private final GameInstance game = new GameInstance();
     private PieceColor winner;
     private boolean hasMoves;
+    // When not null, this user controls both BLACK and WHITE seats.
+    private String selfPlayOwnerUserId;
+    // When not null and winner == null, this user requested "restart another round".
+    // The opponent must confirm (by clicking restart) for the round to actually restart.
+    private String restartPendingFromUserId;
+    // Used for frontend toast: who started the most recent round (restart).
+    private String lastRoundStarterUserId;
+    private Instant lastRoundStarterAt;
     private Path currentRecordFile;
     private Instant recordStartedAt;
 
@@ -61,6 +69,38 @@ public class Room {
 
     public void markMovePlayed() {
         this.hasMoves = true;
+    }
+
+    public String getSelfPlayOwnerUserId() {
+        return selfPlayOwnerUserId;
+    }
+
+    public void setSelfPlayOwnerUserId(String selfPlayOwnerUserId) {
+        this.selfPlayOwnerUserId = selfPlayOwnerUserId;
+    }
+
+    public String getRestartPendingFromUserId() {
+        return restartPendingFromUserId;
+    }
+
+    public void setRestartPendingFromUserId(String restartPendingFromUserId) {
+        this.restartPendingFromUserId = restartPendingFromUserId;
+    }
+
+    public String getLastRoundStarterUserId() {
+        return lastRoundStarterUserId;
+    }
+
+    public void setLastRoundStarterUserId(String lastRoundStarterUserId) {
+        this.lastRoundStarterUserId = lastRoundStarterUserId;
+    }
+
+    public Instant getLastRoundStarterAt() {
+        return lastRoundStarterAt;
+    }
+
+    public void setLastRoundStarterAt(Instant lastRoundStarterAt) {
+        this.lastRoundStarterAt = lastRoundStarterAt;
     }
 
     public Map<String, Participant> getParticipantsById() {
@@ -114,10 +154,27 @@ public class Room {
         game.reset(PieceColor.BLACK);
         winner = null;
         hasMoves = false;
+        selfPlayOwnerUserId = null;
+        restartPendingFromUserId = null;
+        lastRoundStarterUserId = null;
+        lastRoundStarterAt = null;
         blackPlayerUserId = null;
         whitePlayerUserId = null;
         clearChat();
         clearInvites();
+        startNewRecord();
+    }
+
+    /**
+     * Restart a new round inside the same room (keep participants / seats / self-play mode).
+     */
+    public void startNewRound(String starterUserId) {
+        game.reset(PieceColor.BLACK);
+        winner = null;
+        hasMoves = false;
+        restartPendingFromUserId = null;
+        lastRoundStarterUserId = starterUserId;
+        lastRoundStarterAt = Instant.now();
         startNewRecord();
     }
 

@@ -127,6 +127,16 @@ public class RoomService {
             if (existing != null) {
                 // Existing participant can upgrade/downgrade based on available seat.
                 if (desired == RoomRole.PLAYER) {
+                    if (r.getSelfPlayOwnerUserId() != null && !userId.equals(r.getSelfPlayOwnerUserId())) {
+                        // Self-play enabled by another user: everyone else can only spectate.
+                        existing.setRole(RoomRole.SPECTATOR);
+                        existing.setSeat(null);
+                    } else if (r.getSelfPlayOwnerUserId() != null && userId.equals(r.getSelfPlayOwnerUserId())) {
+                        existing.setRole(RoomRole.PLAYER);
+                        existing.setSeat(Seat.BLACK);
+                        r.setBlackPlayerUserId(userId);
+                        r.setWhitePlayerUserId(userId);
+                    } else {
                     // Upgrade spectator -> player only when a seat is available.
                     if (existing.getSeat() == null) {
                         if (r.getBlackPlayerUserId() == null) {
@@ -141,6 +151,7 @@ public class RoomService {
                             existing.setRole(RoomRole.SPECTATOR);
                             existing.setSeat(null);
                         }
+                    }
                     }
                 } else {
                     // Downgrade to spectator and free seat if user currently holds one.
@@ -164,7 +175,9 @@ public class RoomService {
             // Determine actual role
             RoomRole actualRole = desired;
             Seat seat = null;
-            if (desired == RoomRole.PLAYER && r.canJoinAsPlayer()) {
+            if (desired == RoomRole.PLAYER && r.getSelfPlayOwnerUserId() != null && !userId.equals(r.getSelfPlayOwnerUserId())) {
+                actualRole = RoomRole.SPECTATOR;
+            } else if (desired == RoomRole.PLAYER && r.canJoinAsPlayer()) {
                 if (r.getBlackPlayerUserId() == null) {
                     r.setBlackPlayerUserId(userId);
                     seat = Seat.BLACK;
@@ -199,6 +212,12 @@ public class RoomService {
             if (userId.equals(r.getWhitePlayerUserId())) {
                 r.setWhitePlayerUserId(null);
             }
+            if (userId.equals(r.getSelfPlayOwnerUserId())) {
+                r.setSelfPlayOwnerUserId(null);
+            }
+            if (userId.equals(r.getRestartPendingFromUserId())) {
+                r.setRestartPendingFromUserId(null);
+            }
 
             if (r.getParticipantsById().isEmpty()) {
                 // 所有人都退出：重置房间状态（清聊天、清邀请、棋盘初始化、胜负清空、开始新录像文件）
@@ -221,6 +240,7 @@ public class RoomService {
             if (me == null) return ApiResponse.fail("你不在房间内");
             if (seat == null) return ApiResponse.fail("seat不能为空");
             if (me.getSeat() != null) return ApiResponse.fail("你已经是棋手");
+            if (r.getSelfPlayOwnerUserId() != null) return ApiResponse.fail("当前房间处于自己与自己对弈模式");
 
             if (seat == Seat.BLACK) {
                 if (r.getBlackPlayerUserId() != null) return ApiResponse.fail("黑棋席位已有人");
@@ -239,6 +259,154 @@ public class RoomService {
             updateNoPlayerKickTimerLocked(r);
             return ApiResponse.ok("ok", rv);
         }
+    }
+
+    public ApiResponse<RoomView> setSelfPlayMode(String roomId, String userId, boolean enabled) {
+        Room r = requireRoom(roomId);
+        synchronized (r.getLock()) {
+            Participant me = r.getParticipantsById().get(userId);
+            if (me == null) return ApiResponse.fail("你不在房间内");
+
+            r.setRestartPendingFromUserId(null);
+
+            // First entrant only
+            String firstEntrantUserId = null;
+            for (Participant p : r.getParticipantsById().values()) {
+                firstEntrantUserId = p.getUserId();
+                break;
+            }
+            if (firstEntrantUserId == null || !firstEntrantUserId.equals(userId)) {
+                return ApiResponse.fail("只有第一个进入房间的用户可操作");
+            }
+
+            if (enabled) {
+                r.setSelfPlayOwnerUserId(userId);
+                r.setBlackPlayerUserId(userId);
+                r.setWhitePlayerUserId(userId);
+                me.setRole(RoomRole.PLAYER);
+                me.setSeat(Seat.BLACK);
+                for (Participant p : r.getParticipantsById().values()) {
+                    if (p.getUserId().equals(userId)) continue;
+                    p.setRole(RoomRole.SPECTATOR);
+                    p.setSeat(null);
+                }
+            } else {
+                if (r.getSelfPlayOwnerUserId() != null && !r.getSelfPlayOwnerUserId().equals(userId)) {
+                    return ApiResponse.fail("只有开启者可关闭自己与自己对弈");
+                }
+                r.setSelfPlayOwnerUserId(null);
+                // Keep owner as black, release white for others to join.
+                r.setBlackPlayerUserId(userId);
+                r.setWhitePlayerUserId(null);
+                me.setRole(RoomRole.PLAYER);
+                me.setSeat(Seat.BLACK);
+            }
+
+            RoomView rv = roomView(r);
+            eventHub.broadcast(roomId, "room", new RoomEvent("room", rv));
+            eventHub.broadcast(roomId, "state", buildStateEvent(r));
+            updateNoPlayerKickTimerLocked(r);
+            return ApiResponse.ok("ok", rv);
+        }
+    }
+
+    /**
+     * "再开一局"入口。
+     * - 未分胜负时：先发起方设置 pending，等待对方再次点击确认，双方需都有棋手席位。
+     * - 已分胜负时：直接开始新一局，不需要确认。
+     */
+    public ApiResponse<RoomView> restartRound(String roomId, String userId) {
+        Room r = requireRoom(roomId);
+        synchronized (r.getLock()) {
+            Participant me = r.getParticipantsById().get(userId);
+            if (me == null) return ApiResponse.fail("你不在房间内");
+            if (me.getRole() != RoomRole.PLAYER || me.getSeat() == null) return ApiResponse.fail("只有棋手可以重开");
+
+            String black = r.getBlackPlayerUserId();
+            String white = r.getWhitePlayerUserId();
+            if (black == null || white == null) return ApiResponse.fail("需要双方棋手都在场");
+
+            boolean selfPlay = black.equals(white);
+            boolean hasWinner = r.getWinner() != null;
+
+            // Starter will re-create initial board + new record, keep participants & seats.
+            if (hasWinner || selfPlay) {
+                startNewRoundLocked(r, userId);
+                RoomView rv = roomView(r);
+                eventHub.broadcast(roomId, "room", new RoomEvent("room", rv));
+                eventHub.broadcast(roomId, "state", buildStateEvent(r));
+                updateNoPlayerKickTimerLocked(r);
+                return ApiResponse.ok("ok", rv);
+            }
+
+            String pending = r.getRestartPendingFromUserId();
+            if (pending == null) {
+                r.setRestartPendingFromUserId(userId);
+                RoomView rv = roomView(r);
+                eventHub.broadcast(roomId, "room", new RoomEvent("room", rv));
+                eventHub.broadcast(roomId, "state", buildStateEvent(r));
+                updateNoPlayerKickTimerLocked(r);
+                return ApiResponse.ok("pending", rv);
+            }
+
+            if (pending.equals(userId)) {
+                return ApiResponse.fail("已请求重开，等待对方确认");
+            }
+
+            // Pending exists: only the opponent can confirm by clicking restart.
+            String pendingOpponentUserId = pending.equals(black) ? white : (pending.equals(white) ? black : null);
+            if (pendingOpponentUserId != null && pendingOpponentUserId.equals(userId)) {
+                startNewRoundLocked(r, userId);
+                RoomView rv = roomView(r);
+                eventHub.broadcast(roomId, "room", new RoomEvent("room", rv));
+                eventHub.broadcast(roomId, "state", buildStateEvent(r));
+                updateNoPlayerKickTimerLocked(r);
+                return ApiResponse.ok("ok", rv);
+            }
+
+            return ApiResponse.fail("只有对方可以确认重开");
+        }
+    }
+
+    /**
+     * 取消重开请求（仅当当前有 pending 时允许）。
+     */
+    public ApiResponse<RoomView> cancelRestartRound(String roomId, String userId) {
+        Room r = requireRoom(roomId);
+        synchronized (r.getLock()) {
+            Participant me = r.getParticipantsById().get(userId);
+            if (me == null) return ApiResponse.fail("你不在房间内");
+            if (me.getRole() != RoomRole.PLAYER || me.getSeat() == null) return ApiResponse.fail("只有棋手可以取消重开请求");
+
+            String pending = r.getRestartPendingFromUserId();
+            if (pending == null) return ApiResponse.fail("当前没有重开请求");
+
+            String black = r.getBlackPlayerUserId();
+            String white = r.getWhitePlayerUserId();
+            boolean isPlayerInMatch = userId != null && (userId.equals(black) || userId.equals(white));
+            if (!isPlayerInMatch) return ApiResponse.fail("只有对弈中的棋手可操作");
+
+            // Either requester or opponent can cancel.
+            r.setRestartPendingFromUserId(null);
+            RoomView rv = roomView(r);
+            eventHub.broadcast(roomId, "room", new RoomEvent("room", rv));
+            eventHub.broadcast(roomId, "state", buildStateEvent(r));
+            updateNoPlayerKickTimerLocked(r);
+            return ApiResponse.ok("ok", rv);
+        }
+    }
+
+    private void startNewRoundLocked(Room r, String starterUserId) {
+        r.startNewRound(starterUserId);
+        String roomId = r.getRoomId();
+        ensureRoomRecordFile(roomId);
+
+        InitEvent evt = new InitEvent();
+        evt.ts = Instant.now().toString();
+        evt.board = r.getGame().buildBoardView();
+        evt.currentTurn = r.getGame().getCurrentTurn() == null ? null : r.getGame().getCurrentTurn().toString();
+        evt.winner = null;
+        appendGameEvent(r, evt);
     }
 
     /**
@@ -261,6 +429,12 @@ public class RoomService {
             }
             if (userId.equals(r.getWhitePlayerUserId())) {
                 r.setWhitePlayerUserId(null);
+            }
+            if (userId.equals(r.getSelfPlayOwnerUserId())) {
+                r.setSelfPlayOwnerUserId(null);
+            }
+            if (userId.equals(r.getRestartPendingFromUserId())) {
+                r.setRestartPendingFromUserId(null);
             }
 
             p.setRole(RoomRole.SPECTATOR);
@@ -332,8 +506,9 @@ public class RoomService {
                 return denied;
             }
 
+            boolean selfPlayOwnerMoving = r.getSelfPlayOwnerUserId() != null && userId.equals(r.getSelfPlayOwnerUserId());
             PieceColor mustColor = (p.getSeat() == Seat.BLACK) ? PieceColor.BLACK : PieceColor.WHITE;
-            if (r.getGame().getCurrentTurn() != mustColor) {
+            if (!selfPlayOwnerMoving && r.getGame().getCurrentTurn() != mustColor) {
                 GameInstance.MoveResult denied = new GameInstance.MoveResult();
                 denied.success = false;
                 denied.message = "还没轮到你";
@@ -360,6 +535,7 @@ public class RoomService {
                 appendGameEvent(r, mevt);
                 if (res.winner != null) {
                     r.setWinner(res.winner);
+                    r.setRestartPendingFromUserId(null);
                     EndEvent eevt = new EndEvent();
                     eevt.ts = Instant.now().toString();
                     eevt.winner = res.winner.toString();
@@ -626,7 +802,12 @@ public class RoomService {
         res.name = r.getName();
         res.blackPlayerUserId = r.getBlackPlayerUserId();
         res.whitePlayerUserId = r.getWhitePlayerUserId();
-        res.canJoinAsPlayer = r.canJoinAsPlayer();
+        res.selfPlayOwnerUserId = r.getSelfPlayOwnerUserId();
+        res.selfPlayEnabled = r.getSelfPlayOwnerUserId() != null;
+        res.restartPendingFromUserId = r.getRestartPendingFromUserId();
+        res.lastRoundStarterUserId = r.getLastRoundStarterUserId();
+        res.lastRoundStarterAt = r.getLastRoundStarterAt() == null ? null : r.getLastRoundStarterAt().toString();
+        res.canJoinAsPlayer = r.canJoinAsPlayer() && !res.selfPlayEnabled;
 
         List<ParticipantView> users = new ArrayList<>();
         for (Participant p : r.getParticipantsById().values()) {

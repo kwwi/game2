@@ -49,6 +49,11 @@ public class RoomController {
         public String userId;
     }
 
+    public static class SelfPlayRequest {
+        public String userId;
+        public boolean enabled;
+    }
+
     public static class AdminResetRequest {
         public String userId;
         public String name;
@@ -69,6 +74,25 @@ public class RoomController {
     public Map<String, Object> leaveGameAsSpectator(@PathVariable String roomId, @RequestBody LeaveRequest req) {
         roomService.leaveGameAsSpectator(roomId, req.userId);
         return of("success", true);
+    }
+
+    @PostMapping("/{roomId}/self-play")
+    public ApiResponse<RoomView> setSelfPlayMode(@PathVariable String roomId, @RequestBody SelfPlayRequest req) {
+        return roomService.setSelfPlayMode(roomId, req.userId, req.enabled);
+    }
+
+    public static class RestartRequest {
+        public String userId;
+    }
+
+    @PostMapping("/{roomId}/restart")
+    public ApiResponse<RoomView> restartRound(@PathVariable String roomId, @RequestBody RestartRequest req) {
+        return roomService.restartRound(roomId, req.userId);
+    }
+
+    @PostMapping("/{roomId}/restart-cancel")
+    public ApiResponse<RoomView> cancelRestartRound(@PathVariable String roomId, @RequestBody RestartRequest req) {
+        return roomService.cancelRestartRound(roomId, req.userId);
     }
 
     @PostMapping("/{roomId}/seats/{seat}/join")

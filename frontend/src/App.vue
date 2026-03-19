@@ -6,6 +6,21 @@
         <button class="btn" @click="fetchRoomState">刷新房间</button>
         <button class="btn" @click="openRecords">查看对局记录</button>
         <button class="btn" @click="openSoundSettings">声音设置</button>
+        <button
+          v-if="me.role === 'PLAYER' && !replayActive"
+          class="btn btn-primary"
+          @click="restartRoundClick"
+          :disabled="isRestartPendingByMe && !displayWinner"
+        >
+          {{ displayWinner ? '再开一局' : isRestartPendingByMe ? '等待对方确认' : '再开一局' }}
+        </button>
+        <button
+          v-if="canToggleSelfPlay"
+          class="btn"
+          @click="toggleSelfPlayMode"
+        >
+          {{ currentRoom?.selfPlayEnabled ? '取消自己对弈' : '自己与自己对弈' }}
+        </button>
         <button class="btn" @click="leaveGameToSpectator">退出对弈到观众席</button>
         <button class="btn" @click="leaveRoom">退出房间</button>
       </div>
@@ -108,6 +123,12 @@
           </div>
           <div style="font-size:12px; color:#6b7280;">
             你：{{ myRoleText }}
+          </div>
+          <div
+            v-if="currentRoom?.selfPlayEnabled"
+            style="font-size:12px; color:#b45309; margin-top:4px;"
+          >
+            当前为“自己与自己对弈”模式，新加入用户仅可观战。
           </div>
         </div>
 
@@ -227,6 +248,32 @@
             </div>
           </div>
         </div>
+
+      <div
+        v-if="restartConfirmModal"
+        style="position:fixed; inset:0; background:rgba(0,0,0,0.35); display:flex; align-items:center; justify-content:center; padding:20px; z-index:1205;"
+      >
+        <div style="background:white; border-radius:14px; width:min(520px, 100%); padding:14px 16px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <div style="font-weight:600;">确认重开一局</div>
+            <button class="btn" @click="restartConfirmModal=false">关闭</button>
+          </div>
+          <div style="font-size:13px; color:#111827; margin-bottom:14px;">
+            {{ restartRequesterName }} 请求重开一局。是否确认？
+          </div>
+          <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <button class="btn" @click="cancelRestartRound">暂不重开</button>
+            <button class="btn btn-primary" @click="confirmRestartRound">确认重开</button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="restartToastMessage"
+        style="position:fixed; top:84px; left:50%; transform:translateX(-50%); background:rgba(17,24,39,0.95); color:white; padding:10px 14px; border-radius:12px; z-index:1210; font-size:13px;"
+      >
+        {{ restartToastMessage }}
+      </div>
 
         <div style="margin-top:12px;">
           <div style="font-weight:600; margin-bottom:6px;">聊天</div>
@@ -566,6 +613,11 @@ const inviteData = ref(null);
 const takeoverModal = ref(false);
 const takeoverDeclinedForOfferKey = ref(null);
 
+const restartConfirmModal = ref(false);
+const restartToastMessage = ref(null);
+let restartToastTimer = null;
+const restartConfirmForOfferKey = ref(null);
+
 const BOARD_GAP = 2;
 const boardStyle = computed(() => {
   return {
@@ -617,6 +669,37 @@ const myRoleText = computed(() => {
   return mySeatText(me.value.seat);
 });
 
+const isSelfPlayOwner = computed(() => {
+  return !!currentRoom.value?.selfPlayEnabled &&
+    currentRoom.value?.selfPlayOwnerUserId &&
+    String(currentRoom.value.selfPlayOwnerUserId) === String(myUserId.value);
+});
+
+const canToggleSelfPlay = computed(() => {
+  if (!currentRoom.value || replayActive.value) return false;
+  const participants = currentRoom.value.participants || [];
+  const firstUserId = participants.length > 0 ? participants[0].userId : null;
+  if (!firstUserId) return false;
+  if (String(firstUserId) !== String(myUserId.value)) return false;
+  if (currentRoom.value.selfPlayEnabled && !isSelfPlayOwner.value) return false;
+  return true;
+});
+
+const restartPendingFromUserId = computed(() => currentRoom.value?.restartPendingFromUserId || null);
+const isRestartPendingByMe = computed(() => {
+  if (!restartPendingFromUserId.value) return false;
+  return String(restartPendingFromUserId.value) === String(myUserId.value);
+});
+
+const restartRequesterName = computed(() => {
+  const uid = restartPendingFromUserId.value;
+  if (!uid) return '';
+  const list = currentRoom.value?.participants || [];
+  const u = list.find((p) => String(p.userId) === String(uid));
+  if (!u) return String(uid);
+  return participantDisplayName(u);
+});
+
 function participantRoleText(u) {
   if (!u) return '';
   if (u.role !== 'PLAYER') return '观众';
@@ -635,6 +718,7 @@ function participantDisplayName(u) {
 
 function canInviteSpectator(u) {
   if (!u) return false;
+  if (currentRoom.value?.selfPlayEnabled) return false;
   if (me.value.role !== 'PLAYER' || !me.value.seat) return false;
   if (u.userId === myUserId.value) return false;
   if (u.role === 'PLAYER') return false;
@@ -676,6 +760,34 @@ async function declineTakeover() {
   takeoverDeclinedForOfferKey.value = takeoverOfferKey.value;
   takeoverModal.value = false;
   await joinRoom(currentRoomId.value, 'SPECTATOR');
+}
+
+async function restartRoundClick() {
+  if (!currentRoomId.value) return;
+  try {
+    await axios.post(`/api/rooms/${currentRoomId.value}/restart`, {
+      userId: myUserId.value
+    });
+  } catch (e) {
+    // ignore: backend may reject (e.g., already pending by me)
+  }
+}
+
+async function confirmRestartRound() {
+  restartConfirmModal.value = false;
+  await restartRoundClick();
+}
+
+async function cancelRestartRound() {
+  restartConfirmModal.value = false;
+  if (!currentRoomId.value) return;
+  try {
+    await axios.post(`/api/rooms/${currentRoomId.value}/restart-cancel`, {
+      userId: myUserId.value
+    });
+  } catch (e) {
+    // ignore
+  }
 }
 
 function updateBoardMetrics() {
@@ -761,7 +873,67 @@ watch(
   }
 );
 
+function userNameById(uid) {
+  const list = currentRoom.value?.participants || [];
+  const u = list.find((p) => String(p.userId) === String(uid));
+  if (!u) return String(uid);
+  return participantDisplayName(u);
+}
+
+function showRestartToast(msg) {
+  restartToastMessage.value = msg;
+  if (restartToastTimer) clearTimeout(restartToastTimer);
+  restartToastTimer = setTimeout(() => {
+    restartToastMessage.value = null;
+    restartToastTimer = null;
+  }, 2400);
+}
+
+watch(
+  () => restartPendingFromUserId.value,
+  (pending) => {
+    if (replayActive.value) return;
+    if (!pending) {
+      restartConfirmModal.value = false;
+      restartConfirmForOfferKey.value = null;
+      return;
+    }
+    if (displayWinner.value) {
+      restartConfirmModal.value = false;
+      return;
+    }
+    if (me.value.role !== 'PLAYER') {
+      restartConfirmModal.value = false;
+      return;
+    }
+    if (String(pending) === String(myUserId.value)) {
+      // I am the requester: no confirm modal.
+      restartConfirmModal.value = false;
+      return;
+    }
+
+    const key = String(pending);
+    if (restartConfirmForOfferKey.value === key && restartConfirmModal.value) return;
+    restartConfirmForOfferKey.value = key;
+    restartConfirmModal.value = true;
+  }
+);
+
+watch(
+  () => currentRoom.value?.lastRoundStarterAt,
+  (at) => {
+    if (!at) return;
+    const starterId = currentRoom.value?.lastRoundStarterUserId;
+    if (!starterId) return;
+    const starterName = userNameById(starterId);
+    showRestartToast(`${starterName} 开始新一局游戏`);
+  }
+);
+
 const myTurnColor = computed(() => {
+  if (isSelfPlayOwner.value) {
+    return displayCurrentTurn.value || null;
+  }
   if (me.value.role !== 'PLAYER') return null;
   if (me.value.seat === 'BLACK') return 'BLACK';
   if (me.value.seat === 'WHITE') return 'WHITE';
@@ -958,7 +1130,11 @@ function seatName(seat) {
 
 function seatNameWithMe(seat) {
   const list = currentRoom.value?.participants || [];
-  const u = list.find((p) => p.seat === seat);
+  const uid = seat === 'BLACK'
+    ? currentRoom.value?.blackPlayerUserId
+    : currentRoom.value?.whitePlayerUserId;
+  if (!uid) return null;
+  const u = list.find((p) => String(p.userId) === String(uid));
   if (!u) return null;
   return isMeUserId(u.userId) ? `${u.name}（我）` : u.name;
 }
@@ -966,10 +1142,29 @@ function seatNameWithMe(seat) {
 function canJoinSeat(seat) {
   if (!currentRoomId.value) return false;
   if (replayActive.value) return false;
+  if (currentRoom.value?.selfPlayEnabled) return false;
   if (me.value.role === 'PLAYER') return false;
   if (seat === 'BLACK') return !currentRoom.value?.blackPlayerUserId;
   if (seat === 'WHITE') return !currentRoom.value?.whitePlayerUserId;
   return false;
+}
+
+async function toggleSelfPlayMode() {
+  if (!currentRoomId.value || !canToggleSelfPlay.value) return;
+  try {
+    const enable = !currentRoom.value?.selfPlayEnabled;
+    const res = await axios.post(`/api/rooms/${currentRoomId.value}/self-play`, {
+      userId: myUserId.value,
+      enabled: enable
+    });
+    if (res?.data?.success === false) return;
+    if (enable) {
+      localStorage.setItem('bg_mode', 'PLAYER');
+      me.value = { ...me.value, role: 'PLAYER', seat: 'BLACK' };
+    }
+  } catch (e) {
+    // ignore
+  }
 }
 
 async function joinSeat(seat) {
@@ -1191,10 +1386,9 @@ function onPieceClick(cell) {
   if (replayActive.value) return;
   if (!cell.usable || !cell.piece) return;
   if (displayWinner.value) return;
-  // only players can move; also must match turn by backend
+  // Only players can move; also must match turn by UI (backend will validate too).
   if (me.value.role !== 'PLAYER') return;
-  const myTurnColor = me.value.seat === 'BLACK' ? 'BLACK' : me.value.seat === 'WHITE' ? 'WHITE' : null;
-  if (!myTurnColor || myTurnColor !== displayCurrentTurn.value) return;
+  if (!isMyTurn.value) return;
   if (cell.piece !== displayCurrentTurn.value) return;
   selected.value = { x: cell.x, y: cell.y };
   playPickupSound();
