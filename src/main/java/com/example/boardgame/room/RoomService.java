@@ -11,6 +11,11 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import com.example.boardgame.dto.*;
 import com.example.boardgame.dto.record.EndEvent;
 import com.example.boardgame.dto.record.InitEvent;
@@ -32,6 +37,14 @@ public class RoomService {
     private final Path recordsDir;
     private final RoomEventHub eventHub;
     private final ObjectMapper objectMapper;
+
+    private static final long NO_PLAYER_KICK_DELAY_MS = 10L * 60L * 1000L;
+    private final ScheduledExecutorService noPlayerScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "room-no-player-kicker");
+        t.setDaemon(true);
+        return t;
+    });
+    private final Map<String, ScheduledFuture<?>> pendingNoPlayerKickByRoom = new ConcurrentHashMap<>();
 
     public RoomService(RoomEventHub eventHub, ObjectMapper objectMapper) {
         this.eventHub = eventHub;
@@ -75,6 +88,38 @@ public class RoomService {
         }
     }
 
+    public ApiResponse<RoomView> adminResetRoom(String roomId, String userId, String name) {
+        if (name == null || !"hyuan".equalsIgnoreCase(name.trim())) {
+            return ApiResponse.fail("无权限");
+        }
+        Room r = requireRoom(roomId);
+        synchronized (r.getLock()) {
+            // Kick everyone in the room.
+            List<String> kicked = new ArrayList<>(r.getParticipantsById().keySet());
+            r.getParticipantsById().clear();
+            r.setBlackPlayerUserId(null);
+            r.setWhitePlayerUserId(null);
+
+            cancelNoPlayerKick(roomId);
+            eventHub.closeRoom(roomId, "admin_reset_by_hyuan");
+            for (String uid : kicked) {
+                eventHub.delayCloseUser(roomId, uid, 0L, "admin_reset_by_hyuan");
+            }
+
+            // Reset to initial state and start a new record snapshot.
+            r.resetGameToInitial();
+            ensureRoomRecordFile(roomId);
+            InitEvent evt = new InitEvent();
+            evt.ts = Instant.now().toString();
+            evt.board = r.getGame().buildBoardView();
+            evt.currentTurn = r.getGame().getCurrentTurn() == null ? null : r.getGame().getCurrentTurn().toString();
+            evt.winner = null;
+            appendGameEvent(r, evt);
+
+            return ApiResponse.ok("ok", roomView(r));
+        }
+    }
+
     public JoinRoomResponse join(String roomId, String userId, String name, RoomRole desired) {
         Room r = requireRoom(roomId);
         synchronized (r.getLock()) {
@@ -112,6 +157,7 @@ public class RoomService {
                 }
 
                 eventHub.broadcast(roomId, "room", new RoomEvent("room", roomView(r)));
+                updateNoPlayerKickTimerLocked(r);
                 return roomJoinView(r, existing);
             }
 
@@ -136,6 +182,7 @@ public class RoomService {
             r.getParticipantsById().put(userId, p);
 
             eventHub.broadcast(roomId, "room", new RoomEvent("room", roomView(r)));
+            updateNoPlayerKickTimerLocked(r);
             return roomJoinView(r, p);
         }
     }
@@ -161,6 +208,7 @@ public class RoomService {
 
             // 完全退出房间：不判胜负。对局状态保持不变，等待其他用户补位后继续对弈。
             eventHub.broadcast(roomId, "room", new RoomEvent("room", roomView(r)));
+            updateNoPlayerKickTimerLocked(r);
         }
         // Give the browser a short grace period to reconnect/rejoin and reuse the same SSE connection (if still open).
         eventHub.delayCloseUser(roomId, userId, 8000L, "left_room");
@@ -188,6 +236,7 @@ public class RoomService {
             RoomView rv = roomView(r);
             eventHub.broadcast(roomId, "room", new RoomEvent("room", rv));
             eventHub.broadcast(roomId, "state", buildStateEvent(r));
+            updateNoPlayerKickTimerLocked(r);
             return ApiResponse.ok("ok", rv);
         }
     }
@@ -225,6 +274,7 @@ public class RoomService {
                     "winner", r.getWinner(),
                     "room", roomView(r)
             ));
+            updateNoPlayerKickTimerLocked(r);
         }
     }
 
@@ -439,6 +489,7 @@ public class RoomService {
             ));
             eventHub.sendToUser(roomId, invite.getFromUserId(), "inviteResolved", new InviteResolvedEvent(inviteId, "ACCEPTED"));
 
+            updateNoPlayerKickTimerLocked(r);
             return ApiResponse.ok("已同意并完成替换", roomView(r));
         }
     }
@@ -671,6 +722,7 @@ public class RoomService {
     private void resetRoomLocked(Room r) {
         // caller must hold r.getLock()
         String roomId = r.getRoomId();
+        cancelNoPlayerKick(roomId);
         // Proactively close any lingering SSE connections for this room.
         // (This may happen if browsers still hold EventSource connections.)
         eventHub.closeRoom(roomId, "room_reset_no_participants");
@@ -691,6 +743,60 @@ public class RoomService {
                 "winner", null,
                 "room", roomView(r)
         ));
+    }
+
+    private void updateNoPlayerKickTimerLocked(Room r) {
+        // caller must hold r.getLock()
+        String roomId = r.getRoomId();
+        boolean noPlayers = r.getBlackPlayerUserId() == null && r.getWhitePlayerUserId() == null;
+        if (!noPlayers) {
+            cancelNoPlayerKick(roomId);
+            return;
+        }
+        if (pendingNoPlayerKickByRoom.containsKey(roomId)) {
+            return;
+        }
+        ScheduledFuture<?> f = noPlayerScheduler.schedule(() -> kickSpectatorsAndResetIfStillNoPlayers(roomId),
+                NO_PLAYER_KICK_DELAY_MS, TimeUnit.MILLISECONDS);
+        pendingNoPlayerKickByRoom.put(roomId, f);
+    }
+
+    private void cancelNoPlayerKick(String roomId) {
+        ScheduledFuture<?> f = pendingNoPlayerKickByRoom.remove(roomId);
+        if (f != null) {
+            f.cancel(false);
+        }
+    }
+
+    private void kickSpectatorsAndResetIfStillNoPlayers(String roomId) {
+        pendingNoPlayerKickByRoom.remove(roomId);
+        Room r = rooms.get(roomId);
+        if (r == null) return;
+        synchronized (r.getLock()) {
+            boolean noPlayers = r.getBlackPlayerUserId() == null && r.getWhitePlayerUserId() == null;
+            if (!noPlayers) return;
+
+            // Kick everyone currently in the room (all are spectators when noPlayers is true).
+            List<String> toKick = new ArrayList<>(r.getParticipantsById().keySet());
+            r.getParticipantsById().clear();
+
+            // Close SSE connections immediately.
+            eventHub.closeRoom(roomId, "kicked_no_players_timeout");
+            for (String userId : toKick) {
+                // best-effort: if any emitter reappears, close it too
+                eventHub.delayCloseUser(roomId, userId, 0L, "kicked_no_players_timeout");
+            }
+
+            // Reset game state to initial.
+            r.resetGameToInitial();
+            ensureRoomRecordFile(roomId);
+            InitEvent evt = new InitEvent();
+            evt.ts = Instant.now().toString();
+            evt.board = r.getGame().buildBoardView();
+            evt.currentTurn = r.getGame().getCurrentTurn() == null ? null : r.getGame().getCurrentTurn().toString();
+            evt.winner = null;
+            appendGameEvent(r, evt);
+        }
     }
 
     private void appendRecordEvent(Room r, RecordEvent event) {

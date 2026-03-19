@@ -3,6 +3,8 @@ package com.example.boardgame.model;
 import java.util.*;
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -66,15 +68,14 @@ public class Board {
     }
 
     private void initGraph() {
-        // 根据根目录下 cc 文件构建邻接表。
-        // 坐标系直接使用 cc 中的坐标（例如 [2,0]、[9,8] 等），不再做转换。
-        Path path = Paths.get("cc");
-        if (!Files.exists(path)) {
-            return;
-        }
-        try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+        // Build topology from cc.
+        // Prefer classpath resource (packaged into jar), fallback to working directory file "cc".
+        // Coordinates directly use cc's coordinate system (e.g. [2,0], [9,8]).
+        BufferedReader reader = openCcReader();
+        if (reader == null) return;
+        try (BufferedReader r = reader) {
             String line;
-            while ((line = reader.readLine()) != null) {
+            while ((line = r.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty()) {
                     continue;
@@ -123,6 +124,28 @@ public class Board {
         } catch (IOException e) {
             // 读取失败时保持空图，避免中断程序
         }
+    }
+
+    private BufferedReader openCcReader() {
+        // 1) jar resource
+        try {
+            InputStream is = Board.class.getClassLoader().getResourceAsStream("cc");
+            if (is != null) {
+                return new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+            }
+        } catch (Exception e) {
+            // ignore and fallback
+        }
+        // 2) working directory file
+        try {
+            Path path = Paths.get("cc");
+            if (Files.exists(path)) {
+                return Files.newBufferedReader(path, StandardCharsets.UTF_8);
+            }
+        } catch (Exception e) {
+            // ignore
+        }
+        return null;
     }
 
     private void connectBidirectional(Position a, Position b) {

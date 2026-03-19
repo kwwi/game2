@@ -309,3 +309,79 @@ body {
   margin-top: 4px;
 }
 
+/* -------- Mobile responsive -------- */
+@media (max-width: 720px) {
+  #app {
+    align-items: flex-start;
+    padding: 10px 0;
+  }
+
+  .game-container {
+    border-radius: 0;
+    padding: 12px 12px;
+    max-width: 100%;
+    min-height: 100vh;
+  }
+
+  .header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .controls {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .lobby-bar {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .lobby-bar input {
+    flex: 1 1 180px;
+    min-width: 160px;
+  }
+
+  .board-wrapper {
+    flex-direction: column;
+    gap: 14px;
+    align-items: center;
+  }
+
+  .board {
+    /* Ensure board never exceeds viewport width */
+    max-width: 100%;
+  }
+
+  .info-panel {
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    min-height: unset;
+  }
+
+  .players-window {
+    height: auto;
+  }
+
+  .spectators-window {
+    height: auto;
+    max-height: 180px;
+  }
+
+  .chat-window {
+    height: 180px;
+  }
+
+  .records-panel {
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: auto;
+    max-width: none;
+    border-radius: 0;
+  }
+}
+

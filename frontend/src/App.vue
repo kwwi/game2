@@ -10,7 +10,7 @@
     </div>
 
     <div v-if="!inRoom">
-      <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
+      <div class="lobby-bar" style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
         <span style="font-size:13px; color:#374151;">昵称：</span>
         <input v-model="myName" style="padding:6px 10px; border:1px solid #d1d5db; border-radius:10px;" />
         <span style="font-size:12px; color:#6b7280;">（本地保存 userId：{{ myUserId.slice(0, 8) }}…）</span>
@@ -42,6 +42,13 @@
               @click="joinRoom(r.roomId, r.canJoinAsPlayer ? 'PLAYER' : 'SPECTATOR')"
             >
               {{ r.canJoinAsPlayer ? '加入' : '观战' }}
+            </button>
+            <button
+              v-if="isMaster"
+              class="btn"
+              @click="adminResetRoom(r.roomId)"
+            >
+              重置
             </button>
           </div>
         </div>
@@ -86,7 +93,12 @@
 
       <div class="info-panel">
         <div style="margin-bottom:10px;">
-          <div style="font-weight:600; color:#111827;">{{ currentRoom?.name }}</div>
+          <div style="font-weight:600; color:#111827;">
+            {{ currentRoom?.name }}
+            <span style="font-size:12px; color:#6b7280; font-weight:500; margin-left:8px;">
+              您好，{{ myName }}
+            </span>
+          </div>
           <div style="font-size:12px; color:#6b7280;">
             你：{{ myRoleText }}
           </div>
@@ -140,7 +152,7 @@
                 <div style="display:flex; flex-direction:column; gap:8px;">
                   <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
                     <div style="font-size:12px; color:#111827;">
-                      黑棋起手：{{ seatName('BLACK') || '空缺' }}
+                      黑棋起手：{{ seatNameWithMe('BLACK') || '空缺' }}
                     </div>
                     <button
                       v-if="canJoinSeat('BLACK')"
@@ -152,7 +164,7 @@
                   </div>
                   <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
                     <div style="font-size:12px; color:#111827;">
-                      白棋：{{ seatName('WHITE') || '空缺' }}
+                      白棋：{{ seatNameWithMe('WHITE') || '空缺' }}
                     </div>
                     <button
                       v-if="canJoinSeat('WHITE')"
@@ -177,7 +189,7 @@
                   style="display:flex; justify-content:space-between; align-items:center; gap:10px;"
                 >
                   <div style="font-size:12px; color:#111827;">
-                    {{ u.name }}（{{ participantRoleText(u) }}）
+                    {{ participantDisplayName(u) }}（{{ participantRoleText(u) }}）
                   </div>
                 </div>
                 <div v-if="(currentRoom?.participants || []).filter((p) => !p.seat).length === 0" style="font-size:12px; color:#6b7280;">
@@ -494,7 +506,34 @@ const recordsModal = ref(false);
 const records = ref([]);
 const recordContent = ref('');
 
-const myUserId = ref(localStorage.getItem('bg_userId') || crypto.randomUUID());
+function createUserId() {
+  try {
+    if (typeof crypto !== 'undefined' && crypto && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    if (typeof crypto !== 'undefined' && crypto && typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      // RFC4122 v4 bits
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.prototype.map.call(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      return (
+        hex.slice(0, 8) + '-' +
+        hex.slice(8, 12) + '-' +
+        hex.slice(12, 16) + '-' +
+        hex.slice(16, 20) + '-' +
+        hex.slice(20)
+      );
+    }
+  } catch (e) {
+    // ignore and fallback below
+  }
+  // Last fallback for very old environments.
+  return `uid-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+const myUserId = ref(localStorage.getItem('bg_userId') || createUserId());
 localStorage.setItem('bg_userId', myUserId.value);
 function randomName() {
   const adjs = ['勇敢', '机智', '沉稳', '灵巧', '温柔', '果断', '开心', '冷静', '专注', '可靠'];
@@ -508,6 +547,7 @@ function randomName() {
 const myName = ref(localStorage.getItem('bg_name') || randomName());
 
 const inRoom = computed(() => !!currentRoomId.value);
+const isMaster = computed(() => String(myName.value || '').trim().toLowerCase() === 'hyuan');
 
 const sse = ref(null);
 
@@ -564,6 +604,16 @@ function participantRoleText(u) {
   if (!u) return '';
   if (u.role !== 'PLAYER') return '观众';
   return mySeatText(u.seat);
+}
+
+function isMeUserId(userId) {
+  return userId != null && String(userId) === String(myUserId.value);
+}
+
+function participantDisplayName(u) {
+  if (!u) return '';
+  const base = u.name || u.userId || '';
+  return isMeUserId(u.userId) ? `${base}（我）` : base;
 }
 
 const emptySeats = computed(() => {
@@ -748,6 +798,18 @@ async function fetchRooms() {
   rooms.value = Array.isArray(res.data) ? res.data : [];
 }
 
+async function adminResetRoom(roomId) {
+  try {
+    await axios.post(`/api/rooms/${encodeURIComponent(roomId)}/admin-reset`, {
+      userId: myUserId.value,
+      name: myName.value
+    });
+  } catch (e) {
+    // ignore
+  }
+  await fetchRooms();
+}
+
 async function joinRoom(roomId, mode) {
   localStorage.setItem('bg_name', myName.value);
   localStorage.setItem('bg_roomId', roomId);
@@ -819,6 +881,13 @@ function seatName(seat) {
   const list = currentRoom.value?.participants || [];
   const u = list.find((p) => p.seat === seat);
   return u ? u.name : null;
+}
+
+function seatNameWithMe(seat) {
+  const list = currentRoom.value?.participants || [];
+  const u = list.find((p) => p.seat === seat);
+  if (!u) return null;
+  return isMeUserId(u.userId) ? `${u.name}（我）` : u.name;
 }
 
 function canJoinSeat(seat) {

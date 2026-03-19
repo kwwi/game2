@@ -49,6 +49,16 @@ public class RoomController {
         public String userId;
     }
 
+    public static class AdminResetRequest {
+        public String userId;
+        public String name;
+    }
+
+    @PostMapping("/{roomId}/admin-reset")
+    public ApiResponse<RoomView> adminReset(@PathVariable String roomId, @RequestBody AdminResetRequest req) {
+        return roomService.adminResetRoom(roomId, req.userId, req.name);
+    }
+
     @PostMapping("/{roomId}/leave")
     public Map<String, Object> leave(@PathVariable String roomId, @RequestBody LeaveRequest req) {
         roomService.leave(roomId, req.userId);
