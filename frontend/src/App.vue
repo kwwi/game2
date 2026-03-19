@@ -3,6 +3,7 @@
     <div class="header">
       <div class="title">上老王山棋牌游戏</div>
       <div class="controls" v-if="inRoom">
+        <button class="btn" @click="openSoundSettings">声音设置</button>
         <button class="btn" @click="leaveGameToSpectator">退出对弈到观众席</button>
         <button class="btn" @click="leaveRoom">退出房间</button>
       </div>
@@ -13,6 +14,7 @@
         <span style="font-size:13px; color:#374151;">昵称：</span>
         <input v-model="myName" style="padding:6px 10px; border:1px solid #d1d5db; border-radius:10px;" />
         <span style="font-size:12px; color:#6b7280;">（本地保存 userId：{{ myUserId.slice(0, 8) }}…）</span>
+        <button class="btn" @click="openSoundSettings">声音设置</button>
       </div>
 
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
@@ -135,17 +137,31 @@
                 对弈席位
               </div>
               <div class="players-window">
-                <div
-                  v-for="u in (currentRoom?.participants || []).filter((p) => p.seat)"
-                  :key="u.userId"
-                  style="display:flex; justify-content:space-between; align-items:center; gap:10px;"
-                >
-                  <div style="font-size:12px; color:#111827;">
-                    {{ u.name }}（{{ participantRoleText(u) }}）
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                  <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+                    <div style="font-size:12px; color:#111827;">
+                      黑棋起手：{{ seatName('BLACK') || '空缺' }}
+                    </div>
+                    <button
+                      v-if="canJoinSeat('BLACK')"
+                      class="btn btn-primary"
+                      @click="joinSeat('BLACK')"
+                    >
+                      加入
+                    </button>
                   </div>
-                </div>
-                <div v-if="(currentRoom?.participants || []).filter((p) => p.seat).length === 0" style="font-size:12px; color:#6b7280;">
-                  当前无对弈席位
+                  <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+                    <div style="font-size:12px; color:#111827;">
+                      白棋：{{ seatName('WHITE') || '空缺' }}
+                    </div>
+                    <button
+                      v-if="canJoinSeat('WHITE')"
+                      class="btn btn-primary"
+                      @click="joinSeat('WHITE')"
+                    >
+                      加入
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -254,6 +270,58 @@
         </div>
       </div>
     </div>
+
+    <div
+      v-if="soundSettingsModal"
+      style="position:fixed; inset:0; background:rgba(0,0,0,0.35); display:flex; align-items:center; justify-content:center; padding:20px; z-index:1400;"
+    >
+      <div style="background:white; border-radius:14px; width:min(520px, 100%); padding:14px 16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <div style="font-weight:600;">声音设置</div>
+          <button class="btn" @click="soundSettingsModal=false">关闭</button>
+        </div>
+
+        <div style="display:flex; flex-direction:column; gap:12px;">
+          <div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <div style="font-size:13px; color:#111827; font-weight:600;">音效音量</div>
+              <div style="font-size:12px; color:#6b7280;">{{ Math.round(sfxVolume * 100) }}%</div>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              v-model.number="sfxVolume"
+              style="width:100%;"
+            />
+          </div>
+
+          <div>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+              <div style="font-size:13px; color:#111827; font-weight:600;">背景音乐音量</div>
+              <div style="font-size:12px; color:#6b7280;">{{ Math.round(bgmVolume * 100) }}%</div>
+            </div>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              v-model.number="bgmVolume"
+              style="width:100%;"
+            />
+            <div style="font-size:12px; color:#6b7280; margin-top:6px;">
+              提示：浏览器可能需要你先点击页面一次才能开始播放背景音乐。
+            </div>
+          </div>
+
+          <div style="display:flex; gap:8px; justify-content:flex-end;">
+            <button class="btn" @click="previewSfx">试听音效</button>
+            <button class="btn btn-primary" @click="previewBgm">试听背景音乐</button>
+          </div>
+        </div>
+      </div>
+    </div>
     </div>
 </template>
 
@@ -283,17 +351,37 @@ const selected = ref(null);
 // -------- sound effects --------
 // 音效资源默认放在：frontend/public/sounds/
 // 具体文件名与替换方式见：SOUND_EFFECTS.md
+const DEFAULT_SFX_VOLUME = 0.8;
+const DEFAULT_BGM_VOLUME = 0.35;
+const sfxVolume = ref(parseFloat(localStorage.getItem('bg_sfxVolume') || String(DEFAULT_SFX_VOLUME)));
+const bgmVolume = ref(parseFloat(localStorage.getItem('bg_bgmVolume') || String(DEFAULT_BGM_VOLUME)));
+function clamp01(n, fallback = 0) {
+  const x = typeof n === 'number' ? n : parseFloat(String(n));
+  if (!Number.isFinite(x)) return fallback;
+  return Math.max(0, Math.min(1, x));
+}
+sfxVolume.value = clamp01(sfxVolume.value, DEFAULT_SFX_VOLUME);
+bgmVolume.value = clamp01(bgmVolume.value, DEFAULT_BGM_VOLUME);
+
 const SOUND_URLS = {
   pickup: '/sounds/pickup.mp3',
   drop: '/sounds/drop.mp3',
   win: '/sounds/win.mp3',
   lose: '/sounds/lose.mp3',
-  end: '/sounds/end.mp3'
+  end: '/sounds/end.mp3',
+  bgLobby: '/sounds/bg-lobby.mp3',
+  bgRoom: '/sounds/bg-room.mp3'
 };
 
 const audioCache = {};
+const bgm = ref({
+  audio: null,
+  desiredUrl: null,
+  unlocked: false,
+  volume: bgmVolume.value
+});
 
-function safePlay(url, volume = 0.9) {
+function safePlay(url, volume = sfxVolume.value) {
   if (!url) return;
   try {
     const key = url;
@@ -313,6 +401,65 @@ function safePlay(url, volume = 0.9) {
   } catch (e) {
     // ignore
   }
+}
+
+function ensureBgmAudio(url) {
+  if (!url) return null;
+  const a = bgm.value.audio;
+  if (a && bgm.value.desiredUrl === url) return a;
+  // stop old
+  if (a) {
+    try {
+      a.pause();
+    } catch (e) {}
+  }
+  const na = new Audio(url);
+  na.preload = 'auto';
+  na.loop = true;
+  na.volume = bgm.value.volume;
+  bgm.value.audio = na;
+  bgm.value.desiredUrl = url;
+  return na;
+}
+
+async function playBgmForContext() {
+  const url = inRoom.value ? SOUND_URLS.bgRoom : SOUND_URLS.bgLobby;
+  const a = ensureBgmAudio(url);
+  if (!a) return;
+  a.volume = clamp01(bgm.value.volume, DEFAULT_BGM_VOLUME);
+  if (!bgm.value.unlocked) return;
+  try {
+    const p = a.play();
+    if (p && typeof p.catch === 'function') await p.catch(() => {});
+  } catch (e) {}
+}
+
+function stopBgm() {
+  const a = bgm.value.audio;
+  if (!a) return;
+  try {
+    a.pause();
+  } catch (e) {}
+}
+
+function unlockAudioOnce() {
+  if (bgm.value.unlocked) return;
+  bgm.value.unlocked = true;
+  playBgmForContext();
+}
+
+const soundSettingsModal = ref(false);
+function openSoundSettings() {
+  soundSettingsModal.value = true;
+}
+
+function previewSfx() {
+  safePlay(SOUND_URLS.drop, sfxVolume.value);
+}
+
+function previewBgm() {
+  unlockAudioOnce();
+  playBgmForContext();
 }
 
 function playPickupSound() {
@@ -668,6 +815,32 @@ async function leaveGameToSpectator() {
   takeoverModal.value = false;
 }
 
+function seatName(seat) {
+  const list = currentRoom.value?.participants || [];
+  const u = list.find((p) => p.seat === seat);
+  return u ? u.name : null;
+}
+
+function canJoinSeat(seat) {
+  if (!currentRoomId.value) return false;
+  if (replayActive.value) return false;
+  if (me.value.role === 'PLAYER') return false;
+  if (seat === 'BLACK') return !currentRoom.value?.blackPlayerUserId;
+  if (seat === 'WHITE') return !currentRoom.value?.whitePlayerUserId;
+  return false;
+}
+
+async function joinSeat(seat) {
+  if (!currentRoomId.value) return;
+  try {
+    await axios.post(`/api/rooms/${currentRoomId.value}/seats/${encodeURIComponent(seat)}/join`, {
+      userId: myUserId.value
+    });
+    // SSE 会推送 room/state；这里不强制刷新
+    localStorage.setItem('bg_mode', 'PLAYER');
+  } catch (e) {}
+}
+
 function applyState(state) {
   if (!state) return;
   if (state.room) currentRoom.value = state.room;
@@ -915,6 +1088,7 @@ function onResize() {
 onMounted(() => {
   nextTick(() => updateBoardMetrics());
   window.addEventListener('resize', onResize);
+  window.addEventListener('pointerdown', unlockAudioOnce, { once: true });
 
   // 如果用户上次已进入房间，直接恢复进入房间态，不展示房间列表
   if (currentRoomId.value) {
@@ -939,8 +1113,42 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disconnectSse();
   window.removeEventListener('resize', onResize);
+  window.removeEventListener('pointerdown', unlockAudioOnce);
+  stopBgm();
   if (roomsTimer.value) clearInterval(roomsTimer.value);
   if (resizeTimer) clearTimeout(resizeTimer);
 });
+
+watch(
+  () => inRoom.value,
+  () => {
+    // switch BGM track between lobby/room
+    playBgmForContext();
+  }
+);
+
+watch(
+  () => sfxVolume.value,
+  (v) => {
+    const nv = clamp01(v, DEFAULT_SFX_VOLUME);
+    if (nv !== v) sfxVolume.value = nv;
+    localStorage.setItem('bg_sfxVolume', String(nv));
+  }
+);
+
+watch(
+  () => bgmVolume.value,
+  (v) => {
+    const nv = clamp01(v, DEFAULT_BGM_VOLUME);
+    if (nv !== v) bgmVolume.value = nv;
+    bgm.value.volume = nv;
+    if (bgm.value.audio) {
+      try {
+        bgm.value.audio.volume = nv;
+      } catch (e) {}
+    }
+    localStorage.setItem('bg_bgmVolume', String(nv));
+  }
+);
 </script>
 

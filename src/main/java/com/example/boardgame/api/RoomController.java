@@ -1,6 +1,7 @@
 package com.example.boardgame.api;
 
 import com.example.boardgame.room.*;
+import com.example.boardgame.dto.*;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -23,7 +24,7 @@ public class RoomController {
     }
 
     @GetMapping
-    public List<Map<String, Object>> listRooms() {
+    public List<RoomView> listRooms() {
         return roomService.listRooms();
     }
 
@@ -39,7 +40,7 @@ public class RoomController {
     }
 
     @PostMapping("/{roomId}/join")
-    public Map<String, Object> join(@PathVariable String roomId, @RequestBody JoinRequest req) {
+    public JoinRoomResponse join(@PathVariable String roomId, @RequestBody JoinRequest req) {
         RoomRole desired = "PLAYER".equalsIgnoreCase(req.mode) ? RoomRole.PLAYER : RoomRole.SPECTATOR;
         return roomService.join(roomId, req.userId, req.name, desired);
     }
@@ -60,8 +61,14 @@ public class RoomController {
         return of("success", true);
     }
 
+    @PostMapping("/{roomId}/seats/{seat}/join")
+    public ApiResponse<RoomView> joinSeat(@PathVariable String roomId, @PathVariable String seat, @RequestBody LeaveRequest req) {
+        Seat s = "WHITE".equalsIgnoreCase(seat) ? Seat.WHITE : Seat.BLACK;
+        return roomService.joinSeat(roomId, req.userId, s);
+    }
+
     @GetMapping("/{roomId}/state")
-    public Map<String, Object> state(@PathVariable String roomId) {
+    public GameStateView state(@PathVariable String roomId) {
         return roomService.getGameState(roomId);
     }
 
@@ -100,7 +107,7 @@ public class RoomController {
     }
 
     @PostMapping("/{roomId}/invites")
-    public Map<String, Object> createInvite(@PathVariable String roomId, @RequestBody CreateInviteRequest req) {
+    public ApiResponse<InviteView> createInvite(@PathVariable String roomId, @RequestBody CreateInviteRequest req) {
         Seat seat = "WHITE".equalsIgnoreCase(req.seat) ? Seat.WHITE : Seat.BLACK;
         return roomService.createInvite(roomId, req.fromUserId, req.toUserId, seat);
     }
@@ -111,7 +118,7 @@ public class RoomController {
     }
 
     @PostMapping("/{roomId}/invites/{inviteId}/respond")
-    public Map<String, Object> respondInvite(
+    public ApiResponse<RoomView> respondInvite(
             @PathVariable String roomId,
             @PathVariable String inviteId,
             @RequestBody RespondInviteRequest req
@@ -121,13 +128,16 @@ public class RoomController {
     }
 
     @GetMapping("/records")
-    public List<Map<String, Object>> records() {
+    public List<RecordInfo> records() {
         return roomService.listRecords();
     }
 
     @GetMapping("/records/{recordId}")
-    public Map<String, Object> record(@PathVariable String recordId) throws IOException {
-        return of("id", recordId, "content", roomService.readRecord(recordId));
+    public RecordContent record(@PathVariable String recordId) throws IOException {
+        RecordContent rc = new RecordContent();
+        rc.id = recordId;
+        rc.content = roomService.readRecord(recordId);
+        return rc;
     }
 }
 

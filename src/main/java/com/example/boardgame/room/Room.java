@@ -9,6 +9,8 @@ import java.util.*;
 public class Room {
     private final String roomId;
     private final String name;
+    // Per-room lock for correctness under concurrent requests.
+    private final Object lock = new Object();
 
     private final Map<String, Participant> participantsById = new LinkedHashMap<>();
     private String blackPlayerUserId;
@@ -27,6 +29,10 @@ public class Room {
         this.roomId = roomId;
         this.name = name;
         startNewRecord();
+    }
+
+    public Object getLock() {
+        return lock;
     }
 
     public String getRoomId() {
@@ -94,6 +100,25 @@ public class Room {
         while (chat.size() > max) {
             chat.removeFirst();
         }
+    }
+
+    public void clearChat() {
+        chat.clear();
+    }
+
+    public void clearInvites() {
+        invitesById.clear();
+    }
+
+    public void resetGameToInitial() {
+        game.reset(PieceColor.BLACK);
+        winner = null;
+        hasMoves = false;
+        blackPlayerUserId = null;
+        whitePlayerUserId = null;
+        clearChat();
+        clearInvites();
+        startNewRecord();
     }
 
     public Path getCurrentRecordFile() {
