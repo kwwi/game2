@@ -849,6 +849,10 @@ async function leaveRoom() {
   } catch (e) {
     // ignore
   }
+  await exitRoomToLobby();
+}
+
+async function exitRoomToLobby() {
   disconnectSse();
   currentRoomId.value = null;
   localStorage.removeItem('bg_roomId');
@@ -859,8 +863,17 @@ async function leaveRoom() {
   replayBoardState.value = { pieces: {}, edges: [] };
   replayWinner.value = null;
   takeoverModal.value = false;
+  inviteModal.value = false;
+  inviteData.value = null;
   chat.value = [];
-  await fetchRooms();
+  await fetchRooms().catch(() => {});
+}
+
+function forceExitRoomToLobbyByServer(reason) {
+  if (!currentRoomId.value) return;
+  // 被服务端主动关闭房间连接（如管理员重置/房间自动清理）时，自动退回大厅。
+  console.info('room closed by server:', reason || 'unknown');
+  exitRoomToLobby().catch(() => {});
 }
 
 async function leaveGameToSpectator() {
@@ -962,6 +975,15 @@ function connectSse() {
   });
 
   es.addEventListener('inviteResolved', () => {});
+
+  es.addEventListener('close', (evt) => {
+    try {
+      const payload = JSON.parse(evt.data || '{}');
+      forceExitRoomToLobbyByServer(payload.reason || '');
+    } catch (e) {
+      forceExitRoomToLobbyByServer('');
+    }
+  });
 
   es.onerror = () => {
     // browser will auto-reconnect; keep it simple
