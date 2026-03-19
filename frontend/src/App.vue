@@ -1,8 +1,10 @@
 <template>
-  <div class="game-container">
+  <div class="game-container" :class="{ 'room-mode': inRoom }">
     <div class="header">
       <div class="title">上老王山棋牌游戏</div>
       <div class="controls" v-if="inRoom">
+        <button class="btn" @click="fetchRoomState">刷新房间</button>
+        <button class="btn" @click="openRecords">查看对局记录</button>
         <button class="btn" @click="openSoundSettings">声音设置</button>
         <button class="btn" @click="leaveGameToSpectator">退出对弈到观众席</button>
         <button class="btn" @click="leaveRoom">退出房间</button>
@@ -56,7 +58,12 @@
     </div>
 
     <div v-else class="board-wrapper">
-      <div class="board" ref="boardEl" :class="{ 'board-disabled': !isMyTurn || displayWinner }">
+      <div
+        class="board"
+        ref="boardEl"
+        :style="boardStyle"
+        :class="{ 'board-disabled': !isMyTurn || displayWinner }"
+      >
         <svg class="board-lines" :viewBox="svgViewBox" preserveAspectRatio="none">
           <line
             v-for="(e, idx) in edgeLines"
@@ -135,11 +142,6 @@
           <button class="btn btn-primary" @click="stopReplay">退出回放</button>
         </div>
 
-        <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="btn" @click="fetchRoomState">刷新房间</button>
-          <button class="btn" @click="openRecords">查看对局记录</button>
-        </div>
-
         <div style="margin-top:12px;">
           <div style="font-weight:600; margin-bottom:6px;">房间用户</div>
 
@@ -191,6 +193,13 @@
                   <div style="font-size:12px; color:#111827;">
                     {{ participantDisplayName(u) }}（{{ participantRoleText(u) }}）
                   </div>
+                  <button
+                    v-if="canInviteSpectator(u)"
+                    class="btn"
+                    @click="inviteSpectator(u)"
+                  >
+                    邀请替换
+                  </button>
                 </div>
                 <div v-if="(currentRoom?.participants || []).filter((p) => !p.seat).length === 0" style="font-size:12px; color:#6b7280;">
                   暂无观众
@@ -557,6 +566,14 @@ const inviteData = ref(null);
 const takeoverModal = ref(false);
 const takeoverDeclinedForOfferKey = ref(null);
 
+const BOARD_GAP = 2;
+const boardStyle = computed(() => {
+  return {
+    '--cell': `${boardMetrics.value.cell}px`,
+    '--gap': `${boardMetrics.value.gap}px`
+  };
+});
+
 function hashToHue(str) {
   let h = 0;
   for (let i = 0; i < str.length; i++) {
@@ -616,6 +633,23 @@ function participantDisplayName(u) {
   return isMeUserId(u.userId) ? `${base}（我）` : base;
 }
 
+function canInviteSpectator(u) {
+  if (!u) return false;
+  if (me.value.role !== 'PLAYER' || !me.value.seat) return false;
+  if (u.userId === myUserId.value) return false;
+  if (u.role === 'PLAYER') return false;
+  return true;
+}
+
+async function inviteSpectator(u) {
+  if (!u || !canInviteSpectator(u)) return;
+  try {
+    await createInvite(u.userId, me.value.seat);
+  } catch (e) {
+    // ignore
+  }
+}
+
 const emptySeats = computed(() => {
   if (!currentRoom.value) return [];
   const seats = [];
@@ -645,14 +679,40 @@ async function declineTakeover() {
 }
 
 function updateBoardMetrics() {
-  if (!boardEl.value) return;
-  const cs = window.getComputedStyle(boardEl.value);
-  const cell = parseFloat(cs.getPropertyValue('--cell'));
-  const gap = parseFloat(cs.getPropertyValue('--gap'));
-  boardMetrics.value = {
-    cell: Number.isFinite(cell) && cell > 0 ? cell : 40,
-    gap: Number.isFinite(gap) && gap >= 0 ? gap : 2
-  };
+  const w = window.innerWidth || 1280;
+  const h = window.innerHeight || 800;
+  const isMobile = w <= 720;
+  const gap = BOARD_GAP;
+
+  // Grid dimensions: cols=9 rows=11
+  // Keep conservative max size to avoid over-stretch and preserve aesthetics.
+  let maxCell = isMobile ? 40 : 66;
+  let minCell = isMobile ? 24 : 30;
+
+  let availableW;
+  let availableH;
+  if (inRoom.value) {
+    if (isMobile) {
+      availableW = w - 26;
+      availableH = h - 310;
+    } else {
+      // Reserve space for side panel, paddings and gaps in room mode.
+      availableW = w - 470;
+      availableH = h - 170;
+    }
+  } else {
+    availableW = w - 80;
+    availableH = h - 200;
+  }
+  availableW = Math.max(220, availableW);
+  availableH = Math.max(220, availableH);
+
+  const cellByW = (availableW - 8 * gap) / 9;
+  const cellByH = (availableH - 10 * gap) / 11;
+  const raw = Math.min(cellByW, cellByH);
+  const cell = Math.max(minCell, Math.min(maxCell, Math.floor(raw)));
+
+  boardMetrics.value = { cell, gap };
 }
 
 const svgViewBox = computed(() => {
@@ -1200,6 +1260,13 @@ onMounted(() => {
   }, 2000);
   roomsTimer.value = t;
 });
+
+watch(
+  () => inRoom.value,
+  () => {
+    nextTick(() => updateBoardMetrics());
+  }
+);
 
 onBeforeUnmount(() => {
   disconnectSse();
