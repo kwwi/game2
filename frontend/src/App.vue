@@ -1,5 +1,6 @@
 <template>
   <div class="game-container" :class="{ 'room-mode': inRoom }">
+    <div v-if="toastVisible" class="toast">{{ toastText }}</div>
     <div class="header">
       <div class="title">上老王山棋牌游戏</div>
       <div class="controls" v-if="inRoom">
@@ -22,6 +23,7 @@
           {{ currentRoom?.selfPlayEnabled ? '取消自己对弈' : '自己与自己对弈' }}
         </button>
         <button class="btn" @click="leaveGameToSpectator">退出对弈到观众席</button>
+        <button v-if="canRematch" class="btn" @click="proposeRematch">{{ rematchLabel }}</button>
         <button class="btn" @click="leaveRoom">退出房间</button>
       </div>
     </div>
@@ -148,6 +150,9 @@
 
         <div v-if="replayActive" style="margin-top:10px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
           <span style="font-size:12px; color:#6b7280;">回放中（自动播放）</span>
+          <span v-if="replayStepTotal > 0" style="font-size:12px; color:#6b7280;">
+            步骤 {{ replayStepIndex }} / {{ replayStepTotal }}
+          </span>
           <div style="display:flex; align-items:center; gap:8px;">
             <span style="font-size:12px; color:#6b7280;">速度</span>
             <input
@@ -414,7 +419,19 @@ const replayBoardState = ref({ pieces: {}, edges: [] });
 const replayTurn = ref('BLACK');
 const replayWinner = ref(null);
 const replaySpeed = ref(2.4); // 值越大越慢
+const replayStepIndex = ref(0);
+const replayStepTotal = ref(0);
+/** 走棋方本地播放夹/挑分步动画时，忽略 SSE 推送的 state，避免与定时广播打架 */
+const liveCaptureAnimating = ref(false);
+// Simple toast for rematch proposal hints.
+const toastText = ref('');
+const toastVisible = ref(false);
+let toastTimer = null;
 const selected = ref(null);
+
+// 须与后端 RoomService CAPTURE_ANIM_* 一致（响应里也会带毫秒数）
+const DEFAULT_CAPTURE_ANIM_INITIAL_MS = 200;
+const DEFAULT_CAPTURE_ANIM_STEP_MS = 240;
 
 // -------- sound effects --------
 // 音效资源默认放在：frontend/public/sounds/
@@ -849,6 +866,23 @@ const displayWinner = computed(() => {
   return replayActive.value ? replayWinner.value : winner.value;
 });
 
+const rematchLabel = computed(() => {
+  return displayWinner.value ? '再开一局' : '重开一局';
+});
+
+const canRematch = computed(() => {
+  return inRoom.value && me.value.role === 'PLAYER' && !replayActive.value;
+});
+
+function showToast(text) {
+  toastText.value = text;
+  toastVisible.value = true;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastVisible.value = false;
+  }, 2600);
+}
+
 watch(
   () => winner.value,
   (newWinner, oldWinner) => {
@@ -1181,6 +1215,7 @@ async function joinSeat(seat) {
 function applyState(state) {
   if (!state) return;
   if (state.room) currentRoom.value = state.room;
+  if (liveCaptureAnimating.value) return;
   boardState.value = normalizeBoard(state.board);
   currentTurn.value = state.currentTurn;
   winner.value = state.winner;
@@ -1231,6 +1266,14 @@ function connectSse() {
 
   es.addEventListener('inviteResolved', () => {});
 
+  es.addEventListener('rematchProposed', (evt) => {
+    try {
+      const payload = JSON.parse(evt.data || '{}');
+      const proposerName = payload.proposerName || '有人';
+      showToast(`${proposerName}想要再来一局`);
+    } catch (e) {}
+  });
+
   es.addEventListener('close', (evt) => {
     try {
       const payload = JSON.parse(evt.data || '{}');
@@ -1279,6 +1322,18 @@ async function respondInvite(action) {
   inviteData.value = null;
 }
 
+async function proposeRematch() {
+  if (!currentRoomId.value) return;
+  try {
+    await axios.post(`/api/rooms/${currentRoomId.value}/rematch`, {
+      userId: myUserId.value,
+      name: myName.value
+    });
+  } catch (e) {
+    // ignore
+  }
+}
+
 async function openRecords() {
   recordsModal.value = true;
   recordContent.value = '';
@@ -1315,12 +1370,43 @@ function waitMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 与后端分步 SSE 对齐：落子后逐帧展示夹/挑（走棋方用 HTTP 返回的 captureSteps） */
+async function playLiveCaptureAnimation(steps, finalRes) {
+  const initialMs = Number(finalRes.captureAnimationInitialMs) || DEFAULT_CAPTURE_ANIM_INITIAL_MS;
+  const stepMs = Number(finalRes.captureAnimationStepMs) || DEFAULT_CAPTURE_ANIM_STEP_MS;
+  liveCaptureAnimating.value = true;
+  try {
+    let elapsed = 0;
+    for (let i = 0; i < steps.length; i++) {
+      const st = steps[i];
+      boardState.value = normalizeBoard(st.board);
+      currentTurn.value = st.currentTurn || currentTurn.value;
+      winner.value = st.winner ?? null;
+      if (i < steps.length - 1) {
+        const w = i === 0 ? initialMs : stepMs;
+        await waitMs(w);
+        elapsed += w;
+      }
+    }
+    const targetFinalAt = initialMs + steps.length * stepMs;
+    const remaining = Math.max(0, targetFinalAt - elapsed);
+    await waitMs(remaining);
+    boardState.value = normalizeBoard(finalRes.board);
+    currentTurn.value = finalRes.currentTurn;
+    winner.value = finalRes.winner;
+  } finally {
+    liveCaptureAnimating.value = false;
+  }
+}
+
 function stopReplay() {
   replayRunId++;
   replayActive.value = false;
   replayBoardState.value = { pieces: {}, edges: [] };
   replayWinner.value = null;
   replayTurn.value = 'BLACK';
+  replayStepIndex.value = 0;
+  replayStepTotal.value = 0;
   selected.value = null;
 }
 
@@ -1368,15 +1454,23 @@ async function startReplay(recordId) {
     });
   }
 
+  replayStepTotal.value = steps.length;
+  replayStepIndex.value = 0;
+
   for (let i = 0; i < steps.length; i++) {
     if (replayRunId !== runId) return;
     const step = steps[i];
+    replayStepIndex.value = i + 1;
     replayBoardState.value = normalizeBoard(step.board);
     replayTurn.value = step.currentTurn || replayTurn.value;
     replayWinner.value = step.winner || null;
 
-    // 步间隔时间：给用户足够观察每一步
-    const base = i === 0 ? 650 : 850;
+    // 步间隔：帧数多时（单点翻转）自动缩短，避免回放过长
+    let base;
+    if (steps.length > 80) base = i === 0 ? 320 : 180;
+    else if (steps.length > 40) base = i === 0 ? 380 : 240;
+    else if (steps.length > 18) base = i === 0 ? 450 : 300;
+    else base = i === 0 ? 650 : 850;
     const interval = base * replaySpeed.value;
     await waitMs(interval);
   }
@@ -1414,10 +1508,15 @@ async function onCellClick(cell) {
       return;
     }
     playDropSound();
-    boardState.value = normalizeBoard(res.data.board);
-    currentTurn.value = res.data.currentTurn;
-    winner.value = res.data.winner;
     selected.value = null;
+    const steps = res.data.captureSteps;
+    if (Array.isArray(steps) && steps.length > 0) {
+      await playLiveCaptureAnimation(steps, res.data);
+    } else {
+      boardState.value = normalizeBoard(res.data.board);
+      currentTurn.value = res.data.currentTurn;
+      winner.value = res.data.winner;
+    }
   } catch (e) {
   }
 }

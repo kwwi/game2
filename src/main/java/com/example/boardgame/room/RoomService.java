@@ -39,8 +39,17 @@ public class RoomService {
     private final ObjectMapper objectMapper;
 
     private static final long NO_PLAYER_KICK_DELAY_MS = 10L * 60L * 1000L;
+    /** Live board: pause after piece lands before first flip frame. */
+    private static final int CAPTURE_ANIM_INITIAL_MS = 200;
+    /** Live board: time between each single-piece flip frame. */
+    private static final int CAPTURE_ANIM_STEP_MS = 240;
     private final ScheduledExecutorService noPlayerScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "room-no-player-kicker");
+        t.setDaemon(true);
+        return t;
+    });
+    private final ScheduledExecutorService captureAnimScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "room-capture-anim");
         t.setDaemon(true);
         return t;
     });
@@ -116,6 +125,46 @@ public class RoomService {
             evt.winner = null;
             appendGameEvent(r, evt);
 
+            return ApiResponse.ok("ok", roomView(r));
+        }
+    }
+
+    /**
+     * Rematch / Restart game for two existing players.
+     * Requirements:
+     * - Only current chess players (RoomRole.PLAYER & seat != null) can trigger.
+     * - Preserve both seats (blackPlayerUserId/whitePlayerUserId) and start a fresh board.
+     * - Winner decided: any side click starts immediately; toast is broadcast without waiting for opponent confirmation.
+     */
+    public ApiResponse<RoomView> proposeRematch(String roomId, String userId, String name) {
+        Room r = requireRoom(roomId);
+        synchronized (r.getLock()) {
+            Participant p = r.getParticipantsById().get(userId);
+            if (p == null || p.getRole() != RoomRole.PLAYER || p.getSeat() == null) {
+                return ApiResponse.fail("只有棋手可以再开一局");
+            }
+
+            // Preserve players, reset board/winner and start new record.
+            r.resetGameToNewMatchPreservePlayers();
+            cancelNoPlayerKick(roomId);
+            updateNoPlayerKickTimerLocked(r);
+
+            ensureRoomRecordFile(roomId);
+            InitEvent evt = new InitEvent();
+            evt.ts = Instant.now().toString();
+            evt.board = r.getGame().buildBoardView();
+            evt.currentTurn = r.getGame().getCurrentTurn() == null ? null : r.getGame().getCurrentTurn().toString();
+            evt.winner = null;
+            appendGameEvent(r, evt);
+
+            // Broadcast toast/proposal (no confirmation needed).
+            String proposerName = p.getName();
+            eventHub.broadcast(roomId, "rematchProposed",
+                    of("type", "rematchProposed", "proposerUserId", userId, "proposerName", proposerName));
+
+            // Broadcast the fresh state so everyone switches to the new match.
+            broadcastGameState(roomId, r, r.getGame().buildBoardView(), r.getGame().getCurrentTurn(), null);
+            eventHub.broadcast(roomId, "room", of("type", "room", "room", roomView(r)));
             return ApiResponse.ok("ok", roomView(r));
         }
     }
@@ -521,18 +570,58 @@ public class RoomService {
             GameInstance.MoveResult res = r.getGame().move(fromX, fromY, toX, toY);
             if (res.success) {
                 r.markMovePlayed();
-                MoveEvent mevt = new MoveEvent();
-                mevt.ts = Instant.now().toString();
-                mevt.userId = userId;
-                mevt.seat = p.getSeat() == null ? null : p.getSeat().toString();
-                mevt.fromX = fromX;
-                mevt.fromY = fromY;
-                mevt.toX = toX;
-                mevt.toY = toY;
-                mevt.board = res.board;
-                mevt.currentTurn = res.currentTurn == null ? null : res.currentTurn.toString();
-                mevt.winner = res.winner == null ? null : res.winner.toString();
-                appendGameEvent(r, mevt);
+                java.util.List<GameInstance.CaptureStep> captureSteps = res.captureSteps;
+                // If recursive capture produced intermediate snapshots, record them as multiple contiguous `move` events.
+                // Frontend replay will treat each JSONL event with `board` as a separate frame.
+                if (captureSteps != null && !captureSteps.isEmpty()) {
+                    Instant baseTs = Instant.now();
+                    for (int i = 0; i < captureSteps.size(); i++) {
+                        GameInstance.CaptureStep step = captureSteps.get(i);
+                        MoveEvent mevt = new MoveEvent();
+                        mevt.ts = baseTs.plusNanos(i * 1_000_000L).toString(); // ~1ms spacing for stable ordering
+                        mevt.userId = userId;
+                        mevt.seat = p.getSeat() == null ? null : p.getSeat().toString();
+                        mevt.fromX = fromX;
+                        mevt.fromY = fromY;
+                        mevt.toX = toX;
+                        mevt.toY = toY;
+                        mevt.board = step.board;
+                        mevt.currentTurn = step.currentTurn == null ? null : step.currentTurn.toString();
+                        mevt.winner = step.winner == null ? null : step.winner.toString();
+                        appendGameEvent(r, mevt);
+                    }
+
+                    // When the whole move finishes with no winner, the game turn still switches.
+                    // Replay needs one extra snapshot with the switched `currentTurn` (board unchanged).
+                    if (res.winner == null) {
+                        MoveEvent turnEvt = new MoveEvent();
+                        turnEvt.ts = baseTs.plusNanos(captureSteps.size() * 1_000_000L).toString();
+                        turnEvt.userId = userId;
+                        turnEvt.seat = p.getSeat() == null ? null : p.getSeat().toString();
+                        turnEvt.fromX = fromX;
+                        turnEvt.fromY = fromY;
+                        turnEvt.toX = toX;
+                        turnEvt.toY = toY;
+                        turnEvt.board = res.board;
+                        turnEvt.currentTurn = res.currentTurn == null ? null : res.currentTurn.toString();
+                        turnEvt.winner = null;
+                        appendGameEvent(r, turnEvt);
+                    }
+                } else {
+                    // No recursive capture steps: record the move once (old behaviour).
+                    MoveEvent mevt = new MoveEvent();
+                    mevt.ts = Instant.now().toString();
+                    mevt.userId = userId;
+                    mevt.seat = p.getSeat() == null ? null : p.getSeat().toString();
+                    mevt.fromX = fromX;
+                    mevt.fromY = fromY;
+                    mevt.toX = toX;
+                    mevt.toY = toY;
+                    mevt.board = res.board;
+                    mevt.currentTurn = res.currentTurn == null ? null : res.currentTurn.toString();
+                    mevt.winner = res.winner == null ? null : res.winner.toString();
+                    appendGameEvent(r, mevt);
+                }
                 if (res.winner != null) {
                     r.setWinner(res.winner);
                     r.setRestartPendingFromUserId(null);
@@ -543,13 +632,14 @@ public class RoomService {
                     eevt.currentTurn = res.currentTurn == null ? null : res.currentTurn.toString();
                     appendGameEvent(r, eevt);
                 }
-                eventHub.broadcast(roomId, "state", of(
-                        "type", "state",
-                        "board", res.board,
-                        "currentTurn", res.currentTurn == null ? null : res.currentTurn.toString(),
-                        "winner", res.winner == null ? null : res.winner.toString(),
-                        "room", roomView(r)
-                ));
+                // Live UI: step broadcast for landing + each flip; spectators rely on SSE timing.
+                if (captureSteps != null && !captureSteps.isEmpty()) {
+                    res.captureAnimationInitialMs = CAPTURE_ANIM_INITIAL_MS;
+                    res.captureAnimationStepMs = CAPTURE_ANIM_STEP_MS;
+                    scheduleCaptureStateAnimation(roomId, r, captureSteps, res);
+                } else {
+                    broadcastGameState(roomId, r, res.board, res.currentTurn, res.winner);
+                }
             }
             return res;
         }
@@ -785,6 +875,44 @@ public class RoomService {
             r.setWinner(null);
             return getGameState(roomId);
         }
+    }
+
+    private void broadcastGameState(String roomId, Room r, Map<String, Object> board, PieceColor currentTurn, PieceColor winner) {
+        eventHub.broadcast(roomId, "state", of(
+                "type", "state",
+                "board", board,
+                "currentTurn", currentTurn == null ? null : currentTurn.toString(),
+                "winner", winner == null ? null : winner.toString(),
+                "room", roomView(r)
+        ));
+    }
+
+    /**
+     * Live UI: push intermediate boards over time (landing + each single flip), then final state with switched turn / winner.
+     */
+    private void scheduleCaptureStateAnimation(String roomId, Room r, List<GameInstance.CaptureStep> steps, GameInstance.MoveResult res) {
+        if (steps == null || steps.isEmpty()) {
+            broadcastGameState(roomId, r, res.board, res.currentTurn, res.winner);
+            return;
+        }
+        long initial = CAPTURE_ANIM_INITIAL_MS;
+        long stepDel = CAPTURE_ANIM_STEP_MS;
+        for (int i = 0; i < steps.size(); i++) {
+            final int idx = i;
+            long delayMs = (i == 0) ? 0L : initial + (i - 1L) * stepDel;
+            captureAnimScheduler.schedule(() -> {
+                synchronized (r.getLock()) {
+                    GameInstance.CaptureStep st = steps.get(idx);
+                    broadcastGameState(roomId, r, st.board, st.currentTurn, st.winner);
+                }
+            }, delayMs, TimeUnit.MILLISECONDS);
+        }
+        long finalDelayMs = initial + (long) steps.size() * stepDel;
+        captureAnimScheduler.schedule(() -> {
+            synchronized (r.getLock()) {
+                broadcastGameState(roomId, r, res.board, res.currentTurn, res.winner);
+            }
+        }, finalDelayMs, TimeUnit.MILLISECONDS);
     }
 
     // -------- helpers --------

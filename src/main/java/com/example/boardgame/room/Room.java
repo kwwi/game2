@@ -178,6 +178,19 @@ public class Room {
         startNewRecord();
     }
 
+    /**
+     * Rematch: 重置棋局/胜负/记录，但保留当前两名棋手席位（blackPlayerUserId/whitePlayerUserId）。
+     * 聊天与邀请清空，开始新录像文件。
+     */
+    public void resetGameToNewMatchPreservePlayers() {
+        game.reset(PieceColor.BLACK);
+        winner = null;
+        hasMoves = false;
+        clearChat();
+        clearInvites();
+        startNewRecord();
+    }
+
     public Path getCurrentRecordFile() {
         return currentRecordFile;
     }

@@ -1,7 +1,10 @@
 package com.example.boardgame.room;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -79,6 +82,20 @@ public class GameInstance {
         public Map<String, Object> board;
         public PieceColor          currentTurn;
         public PieceColor          winner;
+        // Intermediate board snapshots produced by recursive capture (夹/挑).
+        // Each element corresponds to flipping exactly one opponent piece to moverColor (one "frame").
+        public java.util.List<CaptureStep> captureSteps;
+        /** Delay before first flip frame (ms); set by RoomService when broadcasting live animation. */
+        public int captureAnimationInitialMs;
+        /** Delay between subsequent flip frames (ms). */
+        public int captureAnimationStepMs;
+    }
+
+    // One intermediate snapshot after a single piece flip during capture resolution.
+    public static class CaptureStep {
+        public Map<String, Object> board;
+        public PieceColor currentTurn;
+        public PieceColor winner;
     }
 
     public MoveResult move(int fromX, int fromY, int toX, int toY) {
@@ -118,7 +135,19 @@ public class GameInstance {
         board.setPiece(from, null);
         board.setPiece(to, piece);
 
-        applyRecursiveCaptures(to, piece);
+        // Snapshot after the piece lands, before any 夹/挑 flips (for live + replay first frame).
+        Map<String, Object> boardAfterMoveBeforeCapture = buildBoardView();
+        PieceColor winnerBeforeCaptures = checkWinner();
+
+        List<CaptureStep> captureSteps = new ArrayList<>();
+        applyRecursiveCaptures(to, piece, captureSteps);
+        if (!captureSteps.isEmpty()) {
+            CaptureStep landing = new CaptureStep();
+            landing.board = boardAfterMoveBeforeCapture;
+            landing.currentTurn = piece;
+            landing.winner = winnerBeforeCaptures;
+            captureSteps.add(0, landing);
+        }
 
         PieceColor winner = checkWinner();
         if (winner == null) {
@@ -130,6 +159,7 @@ public class GameInstance {
         result.board = buildBoardView();
         result.currentTurn = currentTurn;
         result.winner = winner;
+        result.captureSteps = captureSteps;
         return result;
     }
 
@@ -146,13 +176,13 @@ public class GameInstance {
         return view;
     }
 
-    private void applyRecursiveCaptures(Position lastMovePos, PieceColor moverColor) {
+    private void applyRecursiveCaptures(Position lastMovePos, PieceColor moverColor, List<CaptureStep> captureSteps) {
         Set<Position> frontier = new HashSet<>();
         frontier.add(lastMovePos);
 
         boolean changed;
         do {
-            CapturePass pass = applySinglePassCaptures(frontier, moverColor);
+            CapturePass pass = applySinglePassCaptures(frontier, moverColor, captureSteps);
             changed = pass.changed;
             frontier = pass.nextFrontier;
         } while (changed && !frontier.isEmpty());
@@ -163,10 +193,14 @@ public class GameInstance {
         Set<Position> nextFrontier = new HashSet<>();
     }
 
-    private CapturePass applySinglePassCaptures(Set<Position> anchors, PieceColor moverColor) {
+    private CapturePass applySinglePassCaptures(Set<Position> anchors, PieceColor moverColor, List<CaptureStep> captureSteps) {
         CapturePass pass = new CapturePass();
         Map<Position, PieceColor> snapshot = new HashMap<>(board.getPieces());
-        Set<Position> toFlip = new HashSet<>();
+        // Build flip groups first:
+        // - 夹 (夹击) => flip one piece (group size 1)
+        // - 挑 (挑夹) => flip two pieces together (group size 2)
+        // Then apply each group and emit exactly one CaptureStep per group.
+        List<List<Position>> flipGroups = new ArrayList<>();
 
         int[][] dirs = {
                          { 1, 0 },
@@ -179,7 +213,11 @@ public class GameInstance {
                          { -1, 1 }
         };
 
-        for (Position a : anchors) {
+        // Stabilize anchor iteration for deterministic replay ordering.
+        List<Position> orderedAnchors = new ArrayList<>(anchors);
+        orderedAnchors.sort(Comparator.comparingInt(Position::getX).thenComparingInt(Position::getY));
+
+        for (Position a : orderedAnchors) {
             PieceColor aColor = snapshot.get(a);
             if (aColor != moverColor)
                 continue;
@@ -195,7 +233,10 @@ public class GameInstance {
                     PieceColor bColor = snapshot.get(b);
                     PieceColor cColor = snapshot.get(c);
                     if (bColor != null && bColor != moverColor && cColor == moverColor) {
-                        toFlip.add(b);
+                        // flip single piece
+                        List<Position> group = new ArrayList<>(1);
+                        group.add(b);
+                        flipGroups.add(group);
                     }
                 }
 
@@ -206,20 +247,46 @@ public class GameInstance {
                     PieceColor lColor = snapshot.get(left);
                     PieceColor rColor = snapshot.get(right);
                     if (lColor != null && lColor != moverColor && rColor != null && rColor != moverColor) {
-                        toFlip.add(left);
-                        toFlip.add(right);
+                        // flip two pieces together
+                        List<Position> group = new ArrayList<>(2);
+                        group.add(left);
+                        group.add(right);
+                        flipGroups.add(group);
                     }
                 }
             }
         }
 
-        if (!toFlip.isEmpty()) {
-            for (Position pos : toFlip) {
+        boolean anyChanged = false;
+        // If a position appears in multiple groups, only the first group that flips it will emit a new frame for it.
+        Set<Position> alreadyFlipped = new HashSet<>();
+        for (List<Position> group : flipGroups) {
+            // Filter out already flipped positions.
+            List<Position> filtered = new ArrayList<>();
+            for (Position p : group) {
+                if (!alreadyFlipped.contains(p)) filtered.add(p);
+            }
+            if (filtered.isEmpty()) continue;
+
+            // Deterministic order inside group (only affects how we apply loops; snapshot is taken after all flips).
+            filtered.sort(Comparator.comparingInt(Position::getX).thenComparingInt(Position::getY));
+
+            for (Position pos : filtered) {
                 board.setPiece(pos, moverColor);
                 pass.nextFrontier.add(pos);
             }
-            pass.changed = true;
+
+            CaptureStep step = new CaptureStep();
+            step.board = buildBoardView();
+            step.currentTurn = moverColor;
+            step.winner = checkWinner();
+            captureSteps.add(step);
+
+            alreadyFlipped.addAll(filtered);
+            anyChanged = true;
         }
+
+        pass.changed = anyChanged;
         return pass;
     }
 

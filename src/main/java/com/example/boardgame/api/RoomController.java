@@ -64,6 +64,16 @@ public class RoomController {
         return roomService.adminResetRoom(roomId, req.userId, req.name);
     }
 
+    public static class RematchRequest {
+        public String userId;
+        public String name; // optional, server prefers participant name
+    }
+
+    @PostMapping("/{roomId}/rematch")
+    public ApiResponse<RoomView> rematch(@PathVariable String roomId, @RequestBody RematchRequest req) {
+        return roomService.proposeRematch(roomId, req.userId, req.name);
+    }
+
     @PostMapping("/{roomId}/leave")
     public Map<String, Object> leave(@PathVariable String roomId, @RequestBody LeaveRequest req) {
         roomService.leave(roomId, req.userId);

@@ -427,3 +427,20 @@ body {
   }
 }
 
+/* Toast (used by rematch proposal) */
+.toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.95);
+  color: white;
+  padding: 10px 14px;
+  border-radius: 12px;
+  z-index: 2500;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.35);
+  font-size: 13px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
