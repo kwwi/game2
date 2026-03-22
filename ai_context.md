@@ -184,3 +184,14 @@
 - 前端新增/修改：
   - `frontend/src/App.vue`：新增“再开一局”按钮、对方确认弹窗与 toast 提示“谁开始新一局”。
 
+### 10) 落子音效 `drop.mp3` 与浏览器自动播放策略
+
+- **现象**：拿起棋子时 `pickup.mp3` 能播，落子成功后 `drop.mp3` 常不播。
+- **原因**：
+  - `pickup` 在 `onPieceClick` 里**同步**调用 `Audio.play()`，仍处在用户点击手势的调用栈内，符合各浏览器自动播放策略。
+  - `drop` 原先在 `onCellClick` 里写在 **`await axios.post('/move')` 之后**再 `playDropSound()`；网络返回时已脱离用户手势，`play()` 会被静默拒绝（`safePlay` 内 `catch`/promise 吞错，表现为无声）。
+- **修复**（`frontend/src/App.vue`）：
+  - 新增 `armSfxPlaybackInUserGesture()`：在发起 `axios.post` **之前**（仍在点击处理的同步阶段）调用；内部 `unlockAudioOnce()`，并对 `drop` / `pickup` 各用**静音** `play()` 后立即 `pause()`、`currentTime=0`、取消 `muted`，把对应 `Audio` 实例与用户激活绑定，便于后续异步里正常 `playDropSound()`。
+  - `onCellClick` 在 `await` 前调用 `armSfxPlaybackInUserGesture()`。
+- **资源**：落子/拿起音效默认路径仍为 `frontend/public/sounds/drop.mp3`、`pickup.mp3`（与 `SOUND_EFFECTS.md` 一致）。
+

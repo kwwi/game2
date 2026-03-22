@@ -488,6 +488,51 @@ function safePlay(url, volume = sfxVolume.value) {
   }
 }
 
+/**
+ * 在「用户点击棋盘格」的同步阶段调用（必须在任何 await 之前）。
+ * 原因：pickup 在同一次手势里播放通常没问题；但 drop 若在 axios 返回后才 play()，
+ * 多数浏览器已不视为用户手势，Audio.play() 会被静默拒绝，导致落子无声。
+ * 这里对关键 SFX 先在同一调用栈内 play() 再立即 pause，后续异步里再 play 即可通过策略。
+ */
+function armSfxPlaybackInUserGesture() {
+  unlockAudioOnce();
+  const urls = [SOUND_URLS.drop, SOUND_URLS.pickup];
+  const vol = clamp01(sfxVolume.value, DEFAULT_SFX_VOLUME);
+  for (const url of urls) {
+    if (!url) continue;
+    try {
+      let a = audioCache[url];
+      if (!a) {
+        a = new Audio(url);
+        a.preload = 'auto';
+        audioCache[url] = a;
+      }
+      a.muted = true;
+      a.volume = vol;
+      const p = a.play();
+      const disarm = () => {
+        try {
+          a.pause();
+          a.currentTime = 0;
+          a.muted = false;
+          a.volume = vol;
+        } catch (e) {
+          try {
+            a.muted = false;
+          } catch (e2) {}
+        }
+      };
+      if (p && typeof p.then === 'function') {
+        p.then(disarm).catch(disarm);
+      } else {
+        disarm();
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+}
+
 function ensureBgmAudio(url) {
   if (!url) return null;
   const a = bgm.value.audio;
@@ -1496,6 +1541,8 @@ async function onCellClick(cell) {
     selected.value = null;
     return;
   }
+  // 必须在 await 之前：把 SFX 与当前点击绑定到同一用户激活，否则落子音效无法播放
+  armSfxPlaybackInUserGesture();
   try {
     const res = await axios.post(`/api/rooms/${currentRoomId.value}/move`, {
       userId: myUserId.value,
